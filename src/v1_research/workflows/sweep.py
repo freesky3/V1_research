@@ -10,7 +10,15 @@ from typing import Any, Literal
 
 from omegaconf import OmegaConf
 
-from v1_research.runs import create_run_dir, json_ready, write_config, write_csv_rows, write_json, write_manifest
+from v1_research.runs import (
+    create_run_dir,
+    json_ready,
+    relative_output_path,
+    write_config,
+    write_csv_rows,
+    write_json,
+    write_manifest,
+)
 from v1_research.workflows.analyze import AnalysisWorkflowConfig, run_analysis_workflow
 from v1_research.workflows.full import FullWorkflowConfig, run_train_then_simulate
 from v1_research.workflows.simulate import SimulationWorkflowConfig, run_grating_simulation
@@ -66,8 +74,8 @@ def run_sweep(cfg: SweepConfig, *, show_progress: bool = True) -> SweepRun:
             "workflow": "sweep",
             "target_workflow": cfg.workflow,
             "outputs": {
-                "runs": str(csv_path.relative_to(run_dir)),
-                "summary": str(summary_path.relative_to(run_dir)),
+                "runs": relative_output_path(csv_path, run_dir),
+                "summary": relative_output_path(summary_path, run_dir),
             },
             "summary": summary,
         },

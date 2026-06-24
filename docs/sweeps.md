@@ -91,6 +91,21 @@ runs/sweep/<timestamp>/
 
 如果某个 grid point 抛错，sweep 记录 `status=error` 和 `error`，然后继续下一个点。CSV 会先归一化列名，所以即使第一行失败、后续行成功，后续 `summary.*` 列也不会丢失。
 
+对 `analyze` workflow 做 sweep 时，analysis metrics summary 中的标量会自动进入 `summary.*` 列，例如：
+
+```yaml
+workflow: analyze
+base:
+  simulation_run: runs/simulate/example
+  analysis:
+    filter_by_osi: false
+parameters:
+  analysis.louvain.thr_prop: [0.08, 0.12, 0.16]
+  analysis.louvain.gamma: [0.7, 0.9]
+```
+
+生成的 CSV 会包含 `summary.n_ensembles`、`summary.classified_fraction`、`summary.osi_mean` 等字段，可直接替代旧的 DG spatial / orientation coverage 参数扫脚本中的主要筛选表。
+
 ## 常用 YAML 入口
 
 当前 `configs/` 下提供轻量入口：

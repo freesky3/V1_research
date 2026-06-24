@@ -8,6 +8,7 @@
 2. `src/v1_research/learning/bcm.py`：BCM sliding threshold 和 excitatory-source efferent weight update。
 3. `src/v1_research/learning/config.py`：显式 learning-rule factory。
 4. `src/v1_research/workflows/train.py`：只依赖 `LearningRule` 协议的 batch helper。
+5. `src/v1_research/learning/diagnostics.py`：训练中间过程的可复用诊断指标。
 
 ## 当前入口
 
@@ -108,6 +109,19 @@ delta = gain.T @ x / n_batch
 
 `BCMLearningRule` 本身不保存训练状态。row-sum caps 跟随 `BCMState`，因此同一个 rule 对象可以在不同 model/state 上复用，不会混用别的模型初始化得到的 row-sum limit。
 
+## 训练诊断
+
+`learning/diagnostics.py` 放可复用的纯计算函数，不接 root config，也不读写磁盘：
+
+- `active_rate_stats(...)`：E/I firing rate 的 active fraction、mean、median、max。
+- `plastic_weight_stats(...)`：`E <- E` 和 `I <- E` plastic blocks 的非零数量和权重统计。
+- `row_sum_pressure(...)`、`cap_fraction(...)`：row-sum cap 压力和接近 cap 的比例。
+- `weight_delta_stats(...)`：相邻模型状态之间的 plastic weight delta。
+- `theta_stats(...)`：BCM theta 的 mean/median。
+- `sample_tracked_weights(...)`、`record_tracked_weights(...)`：用全局 `np.random` 抽样并跟踪 plastic connections。
+
+这些函数用于 workflow inspection，也可以在 notebook 或新的分析脚本中直接复用。抽样不创建局部 RNG，仍由主程序统一 seed 控制。
+
 ## Workflow 边界
 
 `src/v1_research/workflows/train.py` 当前只提供两个小 helper：
@@ -115,7 +129,16 @@ delta = gain.T @ x / n_batch
 - `apply_learning_rule(...)`：初始化或执行一个 rule step。
 - `solve_and_learn_batch(...)`：用 solver 得到 rates，组装 `RateBatch`，再调用 `apply_learning_rule(...)`。
 
-完整 natural-image train workflow、run bundle、checkpoint、CSV log 和 CLI 还没有迁移。后续迁移时应继续让 workflow 只依赖 `LearningRule`，不要重新把 BCM 公式写进 trainer。
+完整 natural-image train workflow 会在 `TrainingInspectionConfig.enabled=True` 时额外写：
+
+```text
+tables/training_diagnostics.csv
+tables/tracked_weights.csv  # 只有存在可跟踪 plastic edge 时写
+figures/training_overview.png  # 只有 save_plots=True 时写
+figures/tracked_weights.png    # 只有 save_plots=True 且有 tracked weights 时写
+```
+
+`save_plots` 默认是 `False`，所以 sweep 或批量训练不会自动生成大量图。workflow 只组装诊断指标，不把 BCM 公式写进 trainer。
 
 ## 随机性约定
 

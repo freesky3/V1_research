@@ -15,7 +15,12 @@ from v1_research.learning.bcm import BCMConfig
 from v1_research.model import L23Config, L4Config
 from v1_research.model.build import ModelConfig
 from v1_research.model.weights import WeightConfig
-from v1_research.workflows.train import NaturalImageWorkflowConfig, TrainingWorkflowConfig, run_training
+from v1_research.workflows.train import (
+    NaturalImageWorkflowConfig,
+    TrainingInspectionConfig,
+    TrainingWorkflowConfig,
+    run_training,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +72,12 @@ def test_training_workflow_writes_log_checkpoint_and_manifest(tmp_path) -> None:
         time=np.array([0.0, 0.01, 0.02], dtype=float),
         batch_size=1,
         epochs=2,
+        inspection=TrainingInspectionConfig(
+            enabled=True,
+            tracked_weight_count=1,
+            save_plots=False,
+            save_per_batch_arrays=True,
+        ),
     )
 
     result = run_training(cfg, show_progress=False)
@@ -80,8 +91,24 @@ def test_training_workflow_writes_log_checkpoint_and_manifest(tmp_path) -> None:
     assert len(rows) == 2
     assert rows[0]["updated"] == "False"
     assert rows[1]["updated"] == "True"
+    with (result.run_dir / "tables" / "training_diagnostics.csv").open(encoding="utf-8", newline="") as handle:
+        diagnostic_rows = list(csv.DictReader(handle))
+    assert len(diagnostic_rows) == 2
+    assert "theta_exc_median" in diagnostic_rows[0]
+    assert not (result.run_dir / "figures" / "training_overview.png").exists()
+    assert (result.run_dir / "arrays" / "training_probe_000001_exc_rates.npy").is_file()
+    assert (result.run_dir / "arrays" / "training_probe_000002_weights.npy").is_file()
 
     manifest = json.loads((result.run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["workflow"] == "train"
     assert manifest["learning_rule"] == "bcm"
     assert manifest["summary"]["samples_seen"] == 2
+    assert manifest["outputs"]["training_diagnostics"] == "tables/training_diagnostics.csv"
+    assert manifest["outputs"]["training_probe_arrays"] == [
+        "arrays/training_probe_000001_exc_rates.npy",
+        "arrays/training_probe_000001_inh_rates.npy",
+        "arrays/training_probe_000001_weights.npy",
+        "arrays/training_probe_000002_exc_rates.npy",
+        "arrays/training_probe_000002_inh_rates.npy",
+        "arrays/training_probe_000002_weights.npy",
+    ]

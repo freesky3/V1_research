@@ -1,400 +1,106 @@
 # Handoff 给下一个 AI
 
-## 当前任务状态
+## 当前目标
 
-目标项目是：`D:\skywalker\sjtu\大三下课程\Research\MouseV1\V1_simulation`。
+目标项目：`D:\skywalker\sjtu\大三下课程\Research\MouseV1\V1_simulation`
 
-当前已经完成第一阶段 model 地基：
-
-- 包名统一为 `v1_research`。
-- 新建 `src/v1_research/data/experimental.py`。
-- 新建 `src/v1_research/model/geometry.py`、`connectivity.py`、`weights.py`、`state.py`、`build.py`。
-- 新建 package wiring：`src/v1_research/__init__.py`、`cli.py`、`model/__init__.py`、`data/__init__.py`。
-- `pyproject.toml` 已改为项目名 `v1-research`，console script 仍叫 `v1-simulation`，入口指向 `v1_research:main`。
-- 加了 model 层测试：`tests/test_model_geometry.py`、`tests/test_model_connectivity.py`、`tests/test_model_build.py`。
-- 新增当前逻辑文档：`docs/model.md`。
-
-目标仓库目前还没有初始 commit，所以 `git status` 会显示整个项目为 untracked。这不是本轮把所有文件都改坏了，而是这个新项目本身还没提交。
-
-## 建议先读
-
-1. `docs/PLAN.md`：总体重构方向。
-2. `docs/model.md`：当前 model/data 层逻辑说明。
-3. `src/v1_research/model/build.py`：当前 model 构建入口。
-4. `tests/test_model_build.py`：seed、shape、权重符号的行为约束。
+本轮完成的是“外围诊断脚本迁移”：不把旧 `train_simulation_analysis/scripts/` 整体搬入新项目，只把有复用价值的计算能力放入 `src/v1_research`，把可配置的行为接到现有 workflow/CLI/run bundle。
 
 ## 建议使用的 skills
 
-- `refactor-v1-research-code`：继续迁移 research code 时使用。
-- `document-v1-research-code`：每完成一个科学子系统后更新逻辑文档。
-- `superpowers:test-driven-development`：改行为前先写测试。
-- `superpowers:systematic-debugging`：测试或构建失败时先定位根因。
-- `superpowers:verification-before-completion`：最终回答前跑验证命令。
+- `refactor-v1-research-code`：继续改 V1 simulation 项目时先读。
+- `document-v1-research-code`：完成一个逻辑子系统后更新 docs。
+- `superpowers:test-driven-development`：新增行为或修 bug 时先写失败测试。
+- `superpowers:systematic-debugging`：遇到测试失败先定位根因。
+- `superpowers:verification-before-completion`：最终答复、提交或声称完成前跑验证。
 
-## 当前 model 层关键设计
+## 已完成工作
 
-主入口：
+新增训练诊断计算：
 
-```python
-from v1_research.data import ExperimentalData
-from v1_research.model import ModelConfig, build_model
+- `src/v1_research/learning/diagnostics.py`
+- 主要入口：`active_rate_stats`、`plastic_weight_stats`、`row_sum_pressure`、`cap_fraction`、`weight_delta_stats`、`theta_stats`、`sample_tracked_weights`、`record_tracked_weights`
+- 这些函数只接 `ModelState`、`BCMState`、`RateBatch` 或数组，不接 root config，不读写磁盘。
 
-empirical = ExperimentalData.from_path("data/sample_data.pkl")
-model = build_model(ModelConfig(), empirical)
-```
+训练 workflow 接入 inspection：
 
-随机性设计：
+- `src/v1_research/workflows/train.py`
+- 新增 `TrainingInspectionConfig`
+- `TrainingWorkflowConfig.inspection` 默认关闭。
+- `inspection.enabled=True` 时写 `tables/training_diagnostics.csv`。
+- 有 tracked edges 时写 `tables/tracked_weights.csv`。
+- `inspection.save_plots=True` 才写 `figures/training_overview.png` 和 `figures/tracked_weights.png`。
+- `inspection.save_per_batch_arrays=True` 才写 per-probe rates/weights `.npy`。
 
-- model 层不再接 `seed`、`rng`、`rngs`、`np.random.default_rng(...)`。
-- 注意删掉配置字段那种工程化防御，只保留少数数学上容易静默出错的检查。
-- 统一由上层 workflow / main 调 `set_seed(CONFIG["seed"])`。
-- 当前 model 层随机调用均走全局 `np.random`：L4 tuning、随机 inhibitory placement、connectivity sampling、weight sampling。
+新增分析诊断能力：
 
-校验取舍：
+- `src/v1_research/analysis/overlap.py`：坐标匹配、contingency、best label match、ARI、overlap surrogate significance。
+- `src/v1_research/analysis/temporal.py`：按 tail fraction 或 end time 切窗口并复用 `run_analysis(...)`。
 
-- 已删除 `L4Config`、`L23Config`、`WeightConfig`、`ModelConfig` 里偏防御式的字段正负检查。
-- 仍保留数学/矩阵不变量检查：probability range、kernel sigma 关系、label shape/value、matrix shape、row equalization zero-score 检查。
-- 用户明确觉得配置 dataclass 的 `__post_init__` 太啰嗦，不利于简洁性；后续不要重新加回“大型 validation framework”。
+新增只读汇总入口：
 
-## 已踩过的坑和解决方式
+- `src/v1_research/workflows/summarize.py`
+- CLI：`v1-simulation summarize --run <run_dir> [--output path]`
+- 只读新 run bundle，不兼容旧 artifact 命名。
 
-1. `uv run pytest` 一开始找不到 pytest。
-   - 解决：在 `pyproject.toml` 加了 `[dependency-groups] dev = ["pytest>=9.0.2"]`。
+增强 sweep 输出：
 
-2. 改包名后 `uv_build` 仍期待 `src/v1_simulation/__init__.py`。
-   - 根因：`[project].name = "v1-simulation"` 会映射到 `v1_simulation`。
-   - 解决：项目名改成 `v1-research`，包目录为 `src/v1_research`。
+- `src/v1_research/workflows/analyze.py` 会把 analysis metrics summary 中的标量放入 workflow summary。
+- `src/v1_research/workflows/sweep.py` 会把目标 workflow 的 summary 展平到 CSV 的 `summary.*` 字段。
+- 旧 DG/Louvain/window/spatial sweep 脚本的常用需求应通过现有 `sweep` 参数网格表达。
 
-3. PowerShell 5 的 `Set-Content -Encoding UTF8` 会给 `pyproject.toml` 写入 BOM，导致 pytest/TOML 报 `Invalid statement (at line 1, column 1)`。
-   - 解决：用 `.NET` 的 `System.Text.UTF8Encoding($false)` 无 BOM 写回。之后尽量避免用 BOM 写 TOML。
+文档：
 
-4. 目标项目在当前 workspace root 外。
-   - 需要工具写入时用 `sandbox_permissions="require_escalated"`。
-   - 不要误改旧项目 `train_simulation_analysis/src/v1_simulation/network`；它只是迁移参考。
+- 更新了 `docs/learning.md`、`docs/analysis.md`、`docs/workflows.md`、`docs/sweeps.md`。
+- 新增 `docs/diagnostics.md`，按当前逻辑说明本轮迁移后的诊断入口。
+- 当前这份 `docs/handoff.md` 用于交接，不是项目正式逻辑文档。
 
-5. `src/V1_simulation/data` 曾在早期检查中出现过，但后来确认 `V1_simulation/src` 是空目录。
-   - 当前实际源码全部在 `src/v1_research`。
+## 遇到的坑与处理
 
-6. 一次机械替换把 `weights.py` 写进了字面量 `` `r`n``。
-   - 已通过整文件重写修复。后续做机械替换后务必读回关键文件。
+1. `compileall` 会在 `src/` 和 `tests/` 下生成 `__pycache__`。
+   - 每次验证后都清理：只删除 `src/` 和 `tests/` 下名为 `__pycache__` 的目录，不碰 `.venv`。
 
-## 已验证命令
+2. `.gitignore` 在本轮开始前已有未提交修改，并且包含 `docs/` ignore。
+   - 不要随手提交 `.gitignore`。
+   - 提交 docs 时用 `git add -f docs/...`。
 
-最近一次相关验证：
+3. `cap_fraction(...)` 初版曾对 cap 数组长度不匹配使用 `np.resize`。
+   - 已改为直接 `ValueError`，这是数学上容易静默出错的检查，符合本项目取舍。
 
-```powershell
-cd D:\skywalker\sjtu\大三下课程\Research\MouseV1\V1_simulation
-uv run pytest
-uv run python -m compileall src tests
-```
+4. tracked weights 初版的 `sample_index` 使用候选边编号，抽样子集时会跳号。
+   - 已改为对抽中的 tracked edges 重新编号 `0..n-1`，CSV 和图例更清楚。
 
-结果：
+5. 不能引入局部 RNG。
+   - `sample_tracked_weights(...)` 使用全局 `np.random.choice`。
+   - `overlap_significance(...)` 使用全局 `np.random.shuffle`。
+   - 不新增 `seed` 字段、不使用 `np.random.default_rng(...)`。
 
-- `uv run pytest`：10 passed。
-- `compileall`：通过。
+## 最近验证结果
 
-## 后续建议
-
-下一步可以继续按 `docs/PLAN.md` 的顺序迁移：
-
-1. `inputs/`：grating、Gabor receptive fields、natural image L4 drive。
-2. `dynamics/`：Wilson-Cowan 方程和 SciPy/JAX solver。
-3. `learning/`：BCM rule 和后续可切换 learning rule。
-4. `workflows/`：train/simulate/analyze 的薄调度层。
-
-迁移时不要复制旧兼容 API。每个子系统完成后都在 `docs/` 下按逻辑补文档，不要按日期写 refactor diary。
-## Inputs/cache 层迁移更新
-
-本轮新增：
-
-- `src/v1_research/inputs/gabor.py`：Gabor RF、visual grid、`L4GaborBank`。
-- `src/v1_research/inputs/grating.py`：解析 drifting-grating L4 drive。
-- `src/v1_research/inputs/natural_images.py`：Van Hateren dataset、crop sampler、preprocessor、L4 projector、static natural-image drive。
-- `src/v1_research/inputs/background.py`：OU background trace 和 RK4 stage samples。
-- `src/v1_research/cache/keys.py`、`storage.py`、`projections.py`：projection matrix 与 natural-image rates cache。
-- `docs/inputs.md`：输入层逻辑说明。
-
-随机性约定继续保持：底层不接 `seed`，不创建局部 RNG。natural-image sampler 和 background 都走全局 `np.random`，由 workflow/main 在入口统一设置 seed。
-
-迁移时删掉了旧项目的兼容探测：输入层直接接收 `PopulationLayout`，使用 `layout.l4.coords`、`layout.l4_tuning_labels`、`layout.l4_preferred_orientations`。不要再加回旧 `L4.N/tunings/pref_dirs` 适配。
-## 文档整理与提交交接
-
-本轮补充了输入/cache 层的逻辑文档，并准备项目首次 git commit。
-
-已完成：
-
-- 重写 `docs/inputs.md`，按当前代码逻辑说明 Gabor RF、drifting grating、natural images、background 的入口、数据流、局部 config 和关键 shape。
-- 新建 `docs/cache.md`，说明 projection matrix cache、natural-image rates cache、cache key 内容、磁盘布局和训练前预热方式。
-- 更新 `.gitignore`，忽略 `.pytest/`、`.pytest_cache/`、环境变量文件、run/output/artifact 目录、外部 Van Hateren `.iml` 数据和 projection cache 目录。
-- 保留 `data/sample_data.pkl` 作为可提交样本数据，因为现有 model tests 依赖它。
-
-遇到的坑和解决方式：
-
-- 目标 repo 位于当前 workspace root 外，读写和 git 操作需要 `sandbox_permissions="require_escalated"`。
-- `apply_patch` 和普通 `Get-Content` 有时会在中文路径/中文文档上触发 Windows sandbox `CryptUnprotectData failed`。解决方式是使用受控提升后的 PowerShell，并用 `[System.Text.UTF8Encoding]::new($false)` 写 UTF-8 no BOM 文本。
-- 目标 repo 当前没有历史提交，`git log` 会报 `current branch 'master' does not have any commits yet`。这是正常初始状态，不代表工作区损坏。
-- `data/vanhateren_iml` 是外部自然图像数据目录，应继续忽略；不要把真实 `.iml` 数据提交进 repo。
-
-后续注意：
-
-- 输入/cache 层仍然遵守全局 seed 约定；不要在底层重新加入 `seed` 字段或 `np.random.default_rng(...)`。
-- 如果后续实现 workflow，cache 路径应由 workflow 显式传入，例如 `data/.projection_cache/`，不要隐藏在训练循环内部。
-# Dynamics 层迁移交接
-
-本轮新增 `src/v1_research/dynamics/`，把 Wilson-Cowan 方程从 solver 后端中独立出来，并接上两个后端：
-
-- `transfer.py`：Siegert transfer table，本地 `TransferConfig` 字段为 `tau_exc`、`tau_inh`、`refractory_tau`、`threshold`、`reset_potential`、`mu_table_max`、`rate_max`。没有保留旧 `tau_e/tau_i/tau_rp/theta/v_r/kind` 兼容字段。
-- `wilson_cowan.py`：独立 Wilson-Cowan 方程。`WilsonCowanEquation` 负责 NumPy RHS、shape 检查、weight block 拆分；`jax_wilson_cowan_rhs` 是 JAX 后端复用的同一方程逻辑。
-- `scipy_solver.py`：`ScipySolver`，包含固定步长 RK4 和 `solve_ivp` 调试路径。
-- `jax_rk4.py`：`JaxRK4Solver`，JAX 仍是 optional extra，只有选择该 backend 时才要求安装。
-- `solvers.py`：`SolverConfig`、`RateResult`、`RateSolver`、`make_solver(...)`、`solve_rates(...)`。
-- `docs/dynamics.md`：当前 dynamics 层逻辑文档。
-
-关键约定：
-
-- solver 不复制 Wilson-Cowan 方程逻辑；SciPy/JAX 都复用 `dynamics/wilson_cowan.py`。
-- dynamic state shape 为 `(n_l23, n_batch)`，drive shape 为 `(n_input, n_batch)`，public E/I trajectory shape 为 `(n_time, n_batch, n_exc/n_inh)`。
-- dynamics 层不创建局部 RNG，也不接 seed。随机性继续放在 workflow/model/input 入口，由主程序统一设置全局 seed。
-- 没有迁移旧 early-stop、diagnostics、Diffrax 或 training_bcm fallback；后续若需要，应按具体 workflow 科学需求重新加最小实现。
-
-新增测试：
-
-- `tests/test_dynamics_transfer.py`
-- `tests/test_dynamics_wilson_cowan.py`
-- `tests/test_dynamics_solvers.py`
-
-遇到的坑和解决方式：
-
-- 目标仓库 `.gitignore` 忽略了整个 `docs/`，所以 `docs/dynamics.md` 和 `docs/handoff.md` 需要用 `git add -f` 显式纳入提交。
-- 当前环境没有安装 JAX；JAX/SciPy 数值对照测试用 `pytest.skip(...)` 显式跳过。安装 optional JAX extra 后，这个测试会实际比较 `JaxRK4Solver` 与 `ScipySolver(method="RK4")`。
-- `compileall` 会在 `src/` 和 `tests/` 下生成 `__pycache__`，提交前已清理；后续验证后也要留意清理生成缓存。
-
-# Learning 层迁移交接
-
-本轮新增 `src/v1_research/learning/`，把 BCM 从旧项目 trainer 风格逻辑里拆成一个可切换的 `LearningRule` 实现，并新增一个薄训练 workflow helper：
-
-- `learning/rules.py`：`RateBatch`、`LearningUpdate`、`LearningRule` 协议。`RateBatch` 使用 batch-first shape：`exc=(n_batch, n_exc)`、`inh=(n_batch, n_inh)`、`external=(n_batch, n_input)`。
-- `learning/bcm.py`：`BCMConfig`、`BCMState`、`BCMRowSumLimits`、`BCMLearningRule` 和 BCM 纯计算函数。
-- `learning/config.py`：`LearningConfig(kind="bcm")` 和 `make_learning_rule(...)`。当前只用显式 `if cfg.kind == "bcm"`，不要引入 registry。
-- `workflows/train.py`：`apply_learning_rule(...)` 和 `solve_and_learn_batch(...)`。这里不出现 BCM 公式，只依赖 `LearningRule` 协议。
-- `docs/learning.md`：当前 learning 层逻辑文档。
-
-关键约定：
-
-- BCM 只更新 excitatory source recurrent efferents：`E <- E` 和 `I <- E`。不更新 inhibitory source block，也不更新 L4 input block。
-- `BCMState` 保存 theta 和初始化时从模型权重得到的 row-sum caps；`BCMLearningRule` 本身不保存训练状态，避免同一个 rule 对象复用时串模型状态。
-- 本轮没有迁移旧 `JAXBCMUpdater`、bad-batch 过滤、steady-state 诊断、checkpoint、CSV log 或完整 natural-image training loop。
-- Learning 层不创建局部 RNG，也没有 seed 字段。给定 model 和 rates 后 BCM 是确定性的。
-
-新增测试：
-
-- `tests/test_learning_bcm.py`：theta 初始化、pre/post theta update、plastic block 选择、topology 外保持 0、`w_max`、row-sum caps、factory。
-- `tests/test_workflows_train.py`：用 fake learning rule 验证 workflow 只依赖协议，首次 batch 只初始化，后续 batch 替换 model/state。
-
-遇到的坑和解决方式：
-
-- 一开始 `BCMLearningRule` 内部缓存了 row-sum caps，后来用测试发现同一个 rule 对象如果初始化两个不同 model，会混用第二个模型的 caps。已改为把 caps 放进 `BCMState`。
-- 测试里手算 inhibitory theta 第二列时曾算错，targeted test 暴露后按 `mean(rates ** 2)` 公式修正了期望。
-- 当前 `.gitignore` 忽略了整个 `docs/`，所以 `docs/learning.md` 和更新后的 `docs/handoff.md` 提交时需要 `git add -f`。
-- `compileall` 仍会生成 `__pycache__`；提交前已清理，后续也要注意。
-
-最近一次验证：
+在目标项目根目录运行：
 
 ```powershell
-uv run pytest tests/test_learning_bcm.py tests/test_workflows_train.py -q
-uv run pytest
-uv run python -m compileall src tests
-```
-
-结果：
-
-- targeted learning/workflow tests：9 passed。
-- 全量 pytest：37 passed, 1 skipped。
-- compileall：通过。
-
-后续建议：
-
-- 下一步如果迁移完整训练 workflow，让自然图像 batch、solver、artifact 保存都在 `workflows/` 或 run bundle 层组装；不要把 BCM 公式写回 trainer。
-- 如果要加入 `JaxBCMLearningRule`，实现同一个 `LearningRule` 协议，并只扩展 `make_learning_rule(...)` 分支。
-- 后续 Oja/Hebbian 规则可以复用 `RateBatch.external`，但 workflow 不应该知道某个规则是否使用 external rates。
-
-# Workflows 层迁移交接
-
-本轮补齐了可运行闭环的 workflow 和 run bundle IO：
-
-- `src/v1_research/runs.py`：新增 run 目录创建、`config.yaml`、`manifest.json`、CSV rows、模型 checkpoint 保存/读取。`state.npz` 保存 layout 和 CSR component，不把 weights/mask 强制转 dense。
-- `src/v1_research/workflows/train.py`：保留原有 `apply_learning_rule(...)` 和 `solve_and_learn_batch(...)`，新增 `NaturalImageWorkflowConfig`、`TrainingWorkflowConfig`、`TrainingRun`、`run_training(...)`。完整流程是 build model -> natural image drive/cache -> solve dynamics -> learning rule -> training log -> final model bundle。
-- `src/v1_research/workflows/simulate.py`：新增 `SimulationWorkflowConfig`、`SimulationRun`、`run_grating_simulation(...)`。支持从 checkpoint 读取模型，或从 config + empirical data 构建 fresh model；输出 grating rates/time/orientation/trajectory arrays。
-- `src/v1_research/workflows/full.py`：新增 `FullWorkflowConfig`、`FullRun`、`run_train_then_simulate(...)`，只是顺序组合 train 和 simulate。
-- `src/v1_research/cli.py`：从 placeholder 改为 Typer app，支持 `train`、`simulate`、`full`，用 OmegaConf 读取 YAML 并应用 `-o key=value` override。
-- `docs/workflows.md`：当前 workflow/run bundle/CLI 的逻辑文档。
-
-关键约定：
-
-- Workflow 只负责调度和 IO，不写 BCM 公式、Gabor 投影公式或 Wilson-Cowan 方程。
-- 仍然不创建局部 RNG，不新增 `seed` 字段；主程序统一设置全局 seed。
-- 当前没有迁移完整 analysis workflow、Louvain/OSI、sweep、旧 diagnostics、early stop 或 Diffrax 路径。
-- `manifest.json` 只放 summary 和 key output paths，不恢复旧 `aE_all.npy`、`run_config.json` 命名。
-
-新增测试：
-
-- `tests/test_runs_io.py`：run dir / manifest / model checkpoint roundtrip。
-- `tests/test_workflows_simulate.py`：从 checkpoint 运行 grating simulation 并检查 run bundle shape。
-- `tests/test_workflows_training_bundle.py`：用临时小 `.iml` 图像跑 natural-image training bundle。
-- `tests/test_cli_workflows.py`：CLI 加载 YAML、应用 override、dispatch workflow；并覆盖 `model_checkpoint: null` 保持为 `None`。
-
-遇到的坑和解决方式：
-
-- `docs/` 被 `.gitignore` 忽略；新增 `docs/workflows.md` 和更新 `docs/handoff.md` 需要 `git add -f`。
-- `compileall` 会生成 `__pycache__`；本轮验证后已清理。
-- CLI 递归构造 dataclass 时，由于 `from __future__ import annotations`，需要用 `get_type_hints(...)` 解析真实类型；否则嵌套 config 不会被正确构造。
-- YAML 里可选路径字段写 `null` 时，一开始会被 `Path(None)` 绊倒；已在 `_coerce_value(...)` 开头保留 `None`。
-- `git status` 中 `.gitignore` 在本轮开始前已有用户/前序修改（新增 `docs/` ignore）。本次提交不要把它作为 workflow 改动一起提交，除非用户明确要求。
-
-最近一次验证：
-
-```powershell
-uv run pytest
-uv run python -m compileall src tests
-rg -n "default_rng|SeedSequence|seed\s*:|seed\s*=|np\.random\.Generator" src\v1_research tests
-```
-
-结果：
-
-- 全量 pytest：43 passed, 1 skipped。
-- compileall：通过。
-- RNG/seed 扫描：无新增局部 RNG/seed 字段输出。
-
-# Analysis 主链路迁移交接
-
-本轮新增 `src/v1_research/analysis/` 和 `src/v1_research/workflows/analyze.py`，迁移主分析链路：
-
-- `analysis/osi.py`：`compute_osi(...)`，用 circular variance 计算 OSI，并返回 preferred simulated direction。
-- `analysis/communities.py`：`LouvainConfig`、`CommunityResult`、cosine/Pearson similarity、agreement matrix、consensus Louvain 和 cluster pruning。
-- `analysis/spatial.py`：distance matrix、center index selection、per-community spatial compactness metrics。
-- `analysis/metrics.py`：activity health、OSI distribution、community summary、`metrics.json` 和 `ensemble_metrics.csv` 写盘。
-- `analysis/pipeline.py`：`AnalysisConfig`、`AnalysisInputs`、`AnalysisResult`、`run_analysis(...)` 和 `load_analysis_inputs_from_simulation(...)`。
-- `analysis/artifacts.py`：写 `analysis/` 下的 compact arrays/JSON，并把 ensemble table 写到 `tables/ensemble_metrics.csv`。
-- `workflows/analyze.py`：`AnalysisWorkflowConfig` 和 `run_analysis_workflow(...)`，从 simulation run bundle 读取数据、调用 analysis、写结果并更新 manifest。
-- `src/v1_research/cli.py`：新增 `v1-simulation analyze --config ... -o ...`。
-
-关键数据流：
-
-```text
-runs/simulate/<timestamp>
--> arrays/excitatory_trajectory.npy or arrays/excitatory_rates.npy
--> arrays/orientation_angles.npy
--> model/state.npz
--> load_analysis_inputs_from_simulation(...)
--> run_analysis(...)
--> analysis/*.npy / *.json
--> tables/ensemble_metrics.csv
--> manifest.json analysis summary
-```
-
-shape 约定：
-
-- simulation trajectory shape 是 `(n_time, n_orientations, n_exc)`；analysis 内部转为 `(n_exc, n_orientations, n_time)`。
-- 若没有 trajectory，fallback 到 `excitatory_rates.npy`，其 shape 为 `(n_orientations, n_exc)`；analysis 内部作为单时间点响应 `(n_exc, n_orientations, 1)`。
-- 当前只分析 excitatory L2/3 cells；坐标和距离从 checkpoint 的 `model.layout.l23` 按 `layout.exc_idx` 取。
-
-随机性约定：
-
-- Analysis 层没有 `seed` 字段，不接 `rng`，不创建 `np.random.default_rng(...)`。
-- Louvain 直接调用 BCT 默认随机路径；BCT 在未显式传 seed 时使用 NumPy 全局随机状态，因此由主程序入口的 `set_seed(CONFIG["seed"])` 统一控制。
-- `select_analysis_neuron_indices(...)` 在 `random_sample_fraction < 1` 时使用全局 `np.random.choice`。
-
-本轮刻意没有迁移：
-
-- `frames_sorted.py`。
-- plotting-heavy diagnostics。
-- spatial surrogate plots。
-- reference-analysis matching。
-- all-cell DG/OU sweep scripts。
-
-遇到的坑和解决方式：
-
-- 一开始测试文件误通过相对 patch 路径落到了旧仓库 `train_simulation_analysis`。已用 `git restore` 恢复旧仓库被改的旧测试，并删除误建的 `tests/test_workflows_analyze.py`；之后所有 patch 都用 `../V1_simulation/...` 目标路径。
-- BCT `consensus_und` 在 `reps=1` 时内部会把候选 partition squeeze 成一维，触发 `AxisError`。解决方式是在调用 BCT consensus 时使用 `max(2, cfg.consensus_reps)`，但 diagnostics 仍记录用户配置的 `consensus_reps`。
-- `.gitignore` 当前忽略了整个 `docs/`，所以新增 `docs/analysis.md` 和更新后的文档提交时需要 `git add -f`。本轮没有把已有 `.gitignore` 改动纳入提交。
-- `compileall` 会生成 `__pycache__`；验证后已清理，后续验证后也要继续清理。
-
-新增测试：
-
-- `tests/test_analysis_osi.py`
-- `tests/test_analysis_clusters.py`
-- `tests/test_analysis_metrics.py`
-- `tests/test_workflows_analyze.py`
-
-最近一次验证：
-
-```powershell
-uv run pytest tests/test_analysis_osi.py tests/test_analysis_metrics.py tests/test_analysis_clusters.py tests/test_workflows_analyze.py tests/test_cli_workflows.py -q
 uv run pytest -q
 uv run python -m compileall src tests
-rg -n "default_rng|SeedSequence|seed\s*:|seed\s*=|np\.random\.Generator" src\v1_research tests
+rg "default_rng|SeedSequence|seed\s*:|seed\s*=|np\.random\.Generator" src tests configs
+rg "v1_simulation|RootConfig|NetworkState|run_config|aE_all|frames_sorted" src tests
 ```
 
 结果：
 
-- targeted analysis/CLI tests：16 passed。
-- 全量 pytest：57 passed, 1 skipped。
-- compileall：通过。
-- RNG/seed 扫描：无输出。
+- `pytest`：`71 passed, 1 skipped, 4 warnings`
+- `compileall`：通过
+- RNG/seed 扫描：无命中
+- 旧兼容依赖扫描：无命中
 
-# Sweep 与常用实验入口交接
+验证后已清理 `src/` 和 `tests/` 下的 `__pycache__`。
 
-本轮新增轻量 grid sweep 和常用 YAML 实验入口：
+## 提交注意
 
-- `src/v1_research/workflows/sweep.py`：新增 `SweepConfig`、`SweepRun`、`expand_grid(...)`、`run_sweep(...)`。它只展开显式参数网格，merge 到 `base`，构造目标 workflow config，然后调用已有 `train/simulate/analyze/full` workflow。
-- `src/v1_research/cli.py`：新增 `v1-simulation sweep --config ... -o ... --progress/--no-progress`。
-- `src/v1_research/workflows/__init__.py`：导出 sweep 入口。
-- `configs/train_smoke.yaml`、`simulate_grating.yaml`、`analyze_louvain.yaml`、`full_smoke.yaml`、`sweep_simulate.yaml`：新增常用实验入口和 sweep 示例。
-- `docs/workflows.md`：补充 sweep workflow 说明。
-- `docs/sweeps.md`：新增 sweep 和常用实验入口的逻辑文档。
-- `tests/test_workflows_sweep.py`：覆盖 grid 展开、CSV/manifest 写盘、失败继续、第一行失败时 summary 列不丢失。
-- `tests/test_cli_workflows.py`：补充 sweep CLI 加载、override 和 dispatch 测试。
+用户要求提交 git commit。提交时建议包含本轮迁移相关的源码、测试和 docs，但排除 `.gitignore`，除非用户明确要求提交该文件。
 
-关键行为：
+推荐 commit message：
 
 ```text
-SweepConfig
--> expand_grid(parameters)
--> OmegaConf.update(base, dot_path, value)
--> dataclass_from_mapping(target workflow config)
--> run_training / run_grating_simulation / run_analysis_workflow / run_train_then_simulate
--> runs/sweep/<timestamp>/tables/runs.csv
--> summary.json + manifest.json
+Migrate peripheral diagnostics into workflows
 ```
-
-sweep 的失败边界是单个 grid point：如果目标 workflow 抛错，`run_sweep(...)` 在 CSV 记录 `status=error` 和 `error`，然后继续后续 grid point。它不会做 resume、scheduler、Hydra group 组合或自动重试。
-
-随机性约定继续保持：
-
-- sweep 不新增 `seed` 字段。
-- sweep 不创建 `np.random.default_rng(...)` 或局部 RNG。
-- 复现仍由主程序入口统一 `set_seed(CONFIG["seed"])`。
-
-遇到的坑和解决方式：
-
-- `OmegaConf.create(value)` 不能用于 float 这类 scalar，一开始 merge grid point 时会报 `Object of unsupported type: 'float'`。解决方式是直接用 `OmegaConf.update(merged, dot_path, value, merge=False)`。
-- CLI override `-o parameters.grating.visual_gain=[...]` 会被 OmegaConf 解析成嵌套 dict，而 YAML 示例里推荐的是 dot-path key。解决方式是在 `SweepConfig.__post_init__` 里把嵌套 `parameters` 压平成 dot-path map。
-- `write_csv_rows(...)` 使用第一行 key 作为 CSV header；如果第一行失败、后续成功，`summary.*` 列会丢失。解决方式是在 sweep 内部先 `_normalize_rows(...)`，不改全局 run IO 行为。
-- `configs/train_smoke.yaml` 和 `full_smoke.yaml` 依赖外部 `data/vanhateren_iml` 自然图像目录；这是当前 training workflow 的真实边界，不要把外部 `.iml` 数据提交进 repo。
-- `.gitignore` 在本轮开始前已有未提交改动并包含 `docs/` ignore。新增文档提交时需要 `git add -f docs/...`，但不要把 `.gitignore` 混入本轮 sweep commit，除非用户明确要求。
-
-最近一次验证：
-
-```powershell
-uv run pytest tests/test_cli_workflows.py tests/test_workflows_sweep.py -q
-uv run pytest -q
-uv run python -m compileall src tests
-rg -n "default_rng|SeedSequence|seed\s*:|seed\s*=|np\.random\.Generator" src\v1_research tests configs
-```
-
-结果：
-
-- targeted sweep/CLI tests：7 passed。
-- 全量 pytest：62 passed, 1 skipped。
-- compileall：通过。
-- RNG/seed 扫描：无输出。

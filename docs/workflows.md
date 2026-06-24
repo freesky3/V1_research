@@ -47,6 +47,7 @@ result = run_training(TrainingWorkflowConfig(), show_progress=False)
 
 - `NaturalImageWorkflowConfig`：自然图像目录、shape、crop、RF config、preprocess config、drive config、projection cache 路径。
 - `TrainingWorkflowConfig`：组合 `ModelConfig`、`SolverConfig`、`LearningConfig`、`BackgroundConfig`、time grid、batch size 和 epoch 数。
+- `TrainingInspectionConfig`：可选训练中间过程诊断，默认关闭；`save_plots=False` 保证 sweep 默认不生图。
 
 数据流：
 
@@ -62,11 +63,14 @@ TrainingWorkflowConfig
    -> RateBatch
    -> LearningRule.initialize(...) or step(...)
 -> tables/training_log.csv
+-> optional tables/training_diagnostics.csv / tracked_weights.csv
 -> model/state.npz
 -> manifest.json
 ```
 
 `solve_and_learn_batch(...)` 仍然是一个薄 helper，只依赖 `LearningRule` 协议，不包含 BCM 公式。首次 batch 初始化 learning state，`updated=False`；后续 batch 调用 rule step，`updated=True`。
+
+开启 `inspection.enabled=True` 时，workflow 会记录 active-rate、theta、plastic weight、row-sum/cap pressure 和可选 tracked weights。只有 `inspection.save_plots=True` 时才写 `figures/training_overview.png` 和 `figures/tracked_weights.png`。
 
 重要 shape：
 
@@ -167,7 +171,7 @@ SweepConfig
 -> manifest.json
 ```
 
-sweep 失败边界很简单：单个 grid point 报错时，在 `tables/runs.csv` 记录 `status=error` 和 `error`，然后继续下一个点。成功行记录目标 workflow 的 `run_dir` 和扁平化的 `summary.*` 字段。
+sweep 失败边界很简单：单个 grid point 报错时，在 `tables/runs.csv` 记录 `status=error` 和 `error`，然后继续下一个点。成功行记录目标 workflow 的 `run_dir` 和扁平化的 `summary.*` 字段。`analyze` workflow 会把 metrics summary 中的标量也放进 `summary`，所以 sweep 可以直接记录 `summary.n_ensembles`、`summary.classified_fraction`、`summary.osi_mean` 等字段，不需要专用分析 sweep 脚本。
 
 ## Analysis Workflow
 
@@ -211,12 +215,15 @@ uv run v1-simulation simulate --config configs/simulate_grating.yaml -o solver.b
 uv run v1-simulation analyze --config configs/analyze_louvain.yaml -o analysis.osi_threshold=0.3
 uv run v1-simulation full --config configs/full.yaml --no-progress
 uv run v1-simulation sweep --config configs/sweep_simulate.yaml -o parameters.grating.visual_gain=[100.0,200.0]
+uv run v1-simulation summarize --run runs/simulate/...
 ```
 
 CLI 使用 `OmegaConf.load(...)` 和 `OmegaConf.from_dotlist(...)` 做 YAML + `key=value` override，然后递归构造对应 workflow dataclass。这里没有全局 schema，也不接管 random seed；主程序仍应在进入 workflow 前统一设置全局 seed。
+
+`summarize` 是只读入口，读取新 run bundle 的 manifest、model checkpoint、常见 arrays、analysis metrics 和训练表，写出 compact `summary.json` 或用户指定输出路径。不兼容旧 artifact 名。
 
 ## 随机性和边界
 
 Workflow 层不创建局部 RNG，也没有 `seed` 字段。随机性来自 model/input/background 中已有的全局 `np.random` 调用，由主程序统一设置 seed。
 
-当前没有恢复旧 diagnostics、early stop 或 Diffrax 路径。后续迁移这些能力时，应把纯计算放到对应科学模块，workflow 只负责读取 run bundle、调用计算、保存结果。
+当前没有恢复 old scripts 的 plotting-only diagnostics、early stop 或 Diffrax 验证脚本。后续迁移这些能力时，应把纯计算放到对应科学模块，workflow 只负责读取 run bundle、调用计算、保存结果。

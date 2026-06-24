@@ -13,6 +13,7 @@ from omegaconf import OmegaConf
 from v1_research.workflows.analyze import AnalysisWorkflowConfig, run_analysis_workflow
 from v1_research.workflows.full import FullWorkflowConfig, run_train_then_simulate
 from v1_research.workflows.simulate import SimulationWorkflowConfig, run_grating_simulation
+from v1_research.workflows.summarize import write_run_summary
 from v1_research.workflows.sweep import SweepConfig, run_sweep
 from v1_research.workflows.train import TrainingWorkflowConfig, run_training
 
@@ -80,6 +81,17 @@ def sweep(
     cfg = load_workflow_config(config, overrides or [], SweepConfig)
     result = run_sweep(cfg, show_progress=progress)
     typer.echo(result.run_dir)
+
+
+@app.command()
+def summarize(
+    run: Annotated[Path, typer.Option("--run", exists=True, file_okay=False)],
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+) -> None:
+    """Summarize a new-format run bundle."""
+
+    path = write_run_summary(run, output)
+    typer.echo(path)
 
 
 def main() -> None:
@@ -163,4 +175,5 @@ __all__ = [
     "run_sweep",
     "run_train_then_simulate",
     "run_training",
+    "write_run_summary",
 ]

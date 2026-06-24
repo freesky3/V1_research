@@ -12,7 +12,7 @@ from v1_research.analysis.pipeline import (
     load_analysis_inputs_from_simulation,
     run_analysis,
 )
-from v1_research.runs import write_config, write_json, write_manifest
+from v1_research.runs import relative_output_path, write_config, write_json, write_manifest
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +69,11 @@ def run_analysis_workflow(cfg: AnalysisWorkflowConfig) -> AnalysisRun:
             int(result.communities.classified_neurons) if result.communities is not None else 0
         ),
     }
+    metrics_summary = result.diagnostics.get("metrics_summary", {})
+    if isinstance(metrics_summary, dict):
+        for key, value in metrics_summary.items():
+            if isinstance(value, (int, float, str)) or value is None:
+                summary[str(key)] = value
     if cfg.output_run_root is None:
         _update_source_manifest(source_run, summary, paths)
     else:
@@ -78,7 +83,11 @@ def run_analysis_workflow(cfg: AnalysisWorkflowConfig) -> AnalysisRun:
                 "workflow": "analyze",
                 "source_run": str(source_run),
                 "analysis": summary,
-                "outputs": {key: str(path.relative_to(output_dir)) for key, path in paths.items() if path.is_relative_to(output_dir)},
+                "outputs": {
+                    key: relative_output_path(path, output_dir)
+                    for key, path in paths.items()
+                    if path.is_relative_to(output_dir)
+                },
             },
         )
     run_dir = source_run if cfg.output_run_root is None else output_dir
@@ -100,7 +109,7 @@ def _update_source_manifest(source_run: Path, summary: dict[str, int | str | flo
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     payload["analysis"] = summary
     payload["analysis_outputs"] = {
-        key: str(path.relative_to(source_run))
+        key: relative_output_path(path, source_run)
         for key, path in paths.items()
         if _is_relative_to(path, source_run)
     }

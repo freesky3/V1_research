@@ -9,7 +9,9 @@
 3. `src/v1_research/analysis/communities.py`：`LouvainConfig`、similarity matrix、agreement matrix、consensus Louvain。
 4. `src/v1_research/analysis/metrics.py`：activity health、OSI distribution、community summary rows。
 5. `src/v1_research/analysis/artifacts.py`：分析结果写盘。
-6. `src/v1_research/workflows/analyze.py`：从 simulation run bundle 读取输入、调用 analysis、更新 manifest。
+6. `src/v1_research/analysis/overlap.py`：两个 analysis label set 的坐标匹配、overlap 和 ARI。
+7. `src/v1_research/analysis/temporal.py`：对不同稳态窗口复用主分析 pipeline。
+8. `src/v1_research/workflows/analyze.py`：从 simulation run bundle 读取输入、调用 analysis、更新 manifest。
 
 ## 当前入口
 
@@ -160,11 +162,17 @@ runs/simulate/<timestamp>/
 
 `output_run_root` 非空时，analysis workflow 会把结果写到指定目录，而不是直接写回 simulation run 的 `analysis/` 子目录。
 
+## Overlap 和时间窗口
+
+`compare_label_sets(...)` 用坐标匹配两个 analysis 的 selected cells，然后计算 non-zero community label contingency、best one-to-one label matches 和 adjusted Rand index。`overlap_significance(...)` 用全局 `np.random.shuffle` 生成 query-label surrogate，不创建局部 RNG。
+
+`run_window_analysis(...)` 接收已经加载好的 `AnalysisInputs`，按 `tail_fractions` 或 `end_times` 切出响应窗口，再调用同一个 `run_analysis(...)`。它用于检查 steady-state window 对 OSI/Louvain 结果的影响，不复制 OSI、Louvain 或 metrics 逻辑。
+
 ## 当前边界
 
 本轮只迁移主分析链路：
 
-- 已迁移：OSI、Louvain、activity/spatial/community metrics、compact artifacts、`analyze` workflow 和 CLI。
-- 未迁移：`frames_sorted.py`、plotting-heavy diagnostics、spatial surrogate plots、reference-analysis matching、DG/OU all-cell sweep scripts。
+- 已迁移：OSI、Louvain、activity/spatial/community metrics、compact artifacts、overlap/ARI、window sensitivity、`analyze` workflow 和 CLI。
+- 未迁移：`frames_sorted.py`、plotting-heavy diagnostics、DG/OU all-cell 专用脚本。
 
 这些未迁移部分如果以后需要，应先明确科学问题，再把纯计算拆到 `analysis/`，把调度放到 `workflows/` 或 sweep 模块中。

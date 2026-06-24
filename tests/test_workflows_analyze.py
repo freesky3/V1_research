@@ -65,6 +65,8 @@ def test_analysis_workflow_reads_simulation_bundle_and_writes_outputs(tmp_path) 
 
     assert result.run_dir == run_dir
     assert result.result.status == "ok"
+    assert "n_ensembles" in result.summary
+    assert "classified_fraction" in result.summary
     assert result.result.osi.shape == (4,)
     assert (run_dir / "analysis" / "osi.npy").is_file()
     assert (run_dir / "analysis" / "preferred_orientation.npy").is_file()

@@ -170,6 +170,12 @@ def model_summary(model: ModelState) -> dict[str, int | list[int]]:
     }
 
 
+def relative_output_path(path: str | Path, root: str | Path) -> str:
+    """Returns a POSIX-style path relative to a run directory."""
+
+    return Path(path).relative_to(Path(root)).as_posix()
+
+
 def json_ready(value: Any) -> Any:
     """Converts common scientific Python objects into JSON/YAML values."""
 
