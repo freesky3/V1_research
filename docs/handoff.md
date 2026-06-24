@@ -341,3 +341,60 @@ rg -n "default_rng|SeedSequence|seed\s*:|seed\s*=|np\.random\.Generator" src\v1_
 - 全量 pytest：57 passed, 1 skipped。
 - compileall：通过。
 - RNG/seed 扫描：无输出。
+
+# Sweep 与常用实验入口交接
+
+本轮新增轻量 grid sweep 和常用 YAML 实验入口：
+
+- `src/v1_research/workflows/sweep.py`：新增 `SweepConfig`、`SweepRun`、`expand_grid(...)`、`run_sweep(...)`。它只展开显式参数网格，merge 到 `base`，构造目标 workflow config，然后调用已有 `train/simulate/analyze/full` workflow。
+- `src/v1_research/cli.py`：新增 `v1-simulation sweep --config ... -o ... --progress/--no-progress`。
+- `src/v1_research/workflows/__init__.py`：导出 sweep 入口。
+- `configs/train_smoke.yaml`、`simulate_grating.yaml`、`analyze_louvain.yaml`、`full_smoke.yaml`、`sweep_simulate.yaml`：新增常用实验入口和 sweep 示例。
+- `docs/workflows.md`：补充 sweep workflow 说明。
+- `docs/sweeps.md`：新增 sweep 和常用实验入口的逻辑文档。
+- `tests/test_workflows_sweep.py`：覆盖 grid 展开、CSV/manifest 写盘、失败继续、第一行失败时 summary 列不丢失。
+- `tests/test_cli_workflows.py`：补充 sweep CLI 加载、override 和 dispatch 测试。
+
+关键行为：
+
+```text
+SweepConfig
+-> expand_grid(parameters)
+-> OmegaConf.update(base, dot_path, value)
+-> dataclass_from_mapping(target workflow config)
+-> run_training / run_grating_simulation / run_analysis_workflow / run_train_then_simulate
+-> runs/sweep/<timestamp>/tables/runs.csv
+-> summary.json + manifest.json
+```
+
+sweep 的失败边界是单个 grid point：如果目标 workflow 抛错，`run_sweep(...)` 在 CSV 记录 `status=error` 和 `error`，然后继续后续 grid point。它不会做 resume、scheduler、Hydra group 组合或自动重试。
+
+随机性约定继续保持：
+
+- sweep 不新增 `seed` 字段。
+- sweep 不创建 `np.random.default_rng(...)` 或局部 RNG。
+- 复现仍由主程序入口统一 `set_seed(CONFIG["seed"])`。
+
+遇到的坑和解决方式：
+
+- `OmegaConf.create(value)` 不能用于 float 这类 scalar，一开始 merge grid point 时会报 `Object of unsupported type: 'float'`。解决方式是直接用 `OmegaConf.update(merged, dot_path, value, merge=False)`。
+- CLI override `-o parameters.grating.visual_gain=[...]` 会被 OmegaConf 解析成嵌套 dict，而 YAML 示例里推荐的是 dot-path key。解决方式是在 `SweepConfig.__post_init__` 里把嵌套 `parameters` 压平成 dot-path map。
+- `write_csv_rows(...)` 使用第一行 key 作为 CSV header；如果第一行失败、后续成功，`summary.*` 列会丢失。解决方式是在 sweep 内部先 `_normalize_rows(...)`，不改全局 run IO 行为。
+- `configs/train_smoke.yaml` 和 `full_smoke.yaml` 依赖外部 `data/vanhateren_iml` 自然图像目录；这是当前 training workflow 的真实边界，不要把外部 `.iml` 数据提交进 repo。
+- `.gitignore` 在本轮开始前已有未提交改动并包含 `docs/` ignore。新增文档提交时需要 `git add -f docs/...`，但不要把 `.gitignore` 混入本轮 sweep commit，除非用户明确要求。
+
+最近一次验证：
+
+```powershell
+uv run pytest tests/test_cli_workflows.py tests/test_workflows_sweep.py -q
+uv run pytest -q
+uv run python -m compileall src tests
+rg -n "default_rng|SeedSequence|seed\s*:|seed\s*=|np\.random\.Generator" src\v1_research tests configs
+```
+
+结果：
+
+- targeted sweep/CLI tests：7 passed。
+- 全量 pytest：62 passed, 1 skipped。
+- compileall：通过。
+- RNG/seed 扫描：无输出。

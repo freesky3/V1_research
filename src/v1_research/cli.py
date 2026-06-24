@@ -13,6 +13,7 @@ from omegaconf import OmegaConf
 from v1_research.workflows.analyze import AnalysisWorkflowConfig, run_analysis_workflow
 from v1_research.workflows.full import FullWorkflowConfig, run_train_then_simulate
 from v1_research.workflows.simulate import SimulationWorkflowConfig, run_grating_simulation
+from v1_research.workflows.sweep import SweepConfig, run_sweep
 from v1_research.workflows.train import TrainingWorkflowConfig, run_training
 
 app = typer.Typer(help="Run V1 research workflows.")
@@ -66,6 +67,19 @@ def full(
     cfg = load_workflow_config(config, overrides or [], FullWorkflowConfig)
     result = run_train_then_simulate(cfg, show_progress=progress)
     typer.echo(result.summary["simulate_run"])
+
+
+@app.command()
+def sweep(
+    config: Annotated[Path, typer.Option("--config", "-c", exists=True, dir_okay=False)],
+    overrides: Annotated[list[str] | None, typer.Option("--override", "-o")] = None,
+    progress: Annotated[bool, typer.Option("--progress/--no-progress")] = True,
+) -> None:
+    """Run a lightweight explicit grid sweep."""
+
+    cfg = load_workflow_config(config, overrides or [], SweepConfig)
+    result = run_sweep(cfg, show_progress=progress)
+    typer.echo(result.run_dir)
 
 
 def main() -> None:
@@ -146,6 +160,7 @@ __all__ = [
     "main",
     "run_analysis_workflow",
     "run_grating_simulation",
+    "run_sweep",
     "run_train_then_simulate",
     "run_training",
 ]

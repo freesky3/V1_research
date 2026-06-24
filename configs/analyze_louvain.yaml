@@ -1,0 +1,18 @@
+simulation_run: runs/simulate/example
+output_run_root: null
+save_inputs: true
+analysis:
+  osi_threshold: 0.0
+  filter_by_osi: false
+  random_sample_fraction: 1.0
+  center_side_fraction: 1.0
+  steady_state_fraction: 0.34
+  louvain:
+    thr_prop: 0.12
+    gamma: 0.55
+    num_runs: 2
+    consensus_tau: 0.5
+    consensus_reps: 2
+    min_module_degree: 1.0
+    min_cluster_size: 1
+    similarity_kind: cosine

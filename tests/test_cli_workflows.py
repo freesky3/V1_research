@@ -53,3 +53,54 @@ def test_cli_config_loader_keeps_optional_null_paths_as_none(tmp_path) -> None:
     cfg = cli.load_workflow_config(config_path, [], SimulationWorkflowConfig)
 
     assert cfg.model_checkpoint is None
+
+
+def test_cli_sweep_loads_config_applies_override_and_dispatches(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "sweep.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "workflow: simulate",
+                "run_root: runs",
+                "base:",
+                "  grating:",
+                "    n_orientations: 4",
+                "parameters:",
+                "  grating.visual_gain: [100.0]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_run_sweep(cfg, *, show_progress: bool = True):
+        captured["workflow"] = cfg.workflow
+        captured["visual_gain"] = cfg.parameters["grating.visual_gain"]
+        captured["show_progress"] = show_progress
+
+        class Result:
+            run_dir = tmp_path / "runs" / "sweep" / "demo"
+
+        return Result()
+
+    monkeypatch.setattr(cli, "run_sweep", fake_run_sweep)
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "sweep",
+            "--config",
+            str(config_path),
+            "-o",
+            "parameters.grating.visual_gain=[200.0,300.0]",
+            "--no-progress",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "workflow": "simulate",
+        "visual_gain": [200.0, 300.0],
+        "show_progress": False,
+    }
+    assert str(tmp_path / "runs" / "sweep" / "demo") in result.output

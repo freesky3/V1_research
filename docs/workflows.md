@@ -9,7 +9,8 @@
 3. `src/v1_research/workflows/simulate.py`：drifting-grating simulation workflow。
 4. `src/v1_research/workflows/analyze.py`：simulation run bundle 的 OSI/Louvain/metrics 分析 workflow。
 5. `src/v1_research/workflows/full.py`：先 train 后 simulate 的组合 workflow。
-6. `src/v1_research/cli.py`：Typer + OmegaConf 的命令入口。
+6. `src/v1_research/workflows/sweep.py`：轻量 grid sweep，展开 YAML 参数并调用已有 workflow。
+7. `src/v1_research/cli.py`：Typer + OmegaConf 的命令入口。
 
 ## Run Bundle
 
@@ -121,6 +122,53 @@ result = run_train_then_simulate(FullWorkflowConfig())
 
 `run_train_then_simulate(...)` 先运行 `run_training(...)`，再把训练输出的 `model/` checkpoint 作为 `SimulationWorkflowConfig.model_checkpoint` 传给 `run_grating_simulation(...)`。它只是组合两个 workflow，不新增训练或仿真的科学逻辑。
 
+## Sweep Workflow
+
+入口：
+
+```python
+from v1_research.workflows import SweepConfig, run_sweep
+
+result = run_sweep(
+    SweepConfig(
+        workflow="simulate",
+        base={"solver": {"backend": "scipy"}},
+        parameters={"grating.visual_gain": [100.0, 200.0]},
+    )
+)
+```
+
+`SweepConfig` 位于 `workflows/sweep.py`，只包含目标 workflow、base config、显式参数网格和 sweep run 根目录。它不恢复 Hydra config group，也不引入调度器、resume 或随机种子。参数网格使用 dot path 展开，例如：
+
+```yaml
+workflow: simulate
+run_root: runs
+base:
+  solver:
+    backend: scipy
+    scipy_method: RK4
+  grating:
+    n_orientations: 4
+parameters:
+  grating.visual_gain: [100.0, 200.0]
+  solver.store_trajectory: [false, true]
+```
+
+数据流：
+
+```text
+SweepConfig
+-> expand_grid(parameters)
+-> merge each grid point into base
+-> construct target workflow dataclass
+-> call train/simulate/analyze/full workflow
+-> tables/runs.csv
+-> summary.json
+-> manifest.json
+```
+
+sweep 失败边界很简单：单个 grid point 报错时，在 `tables/runs.csv` 记录 `status=error` 和 `error`，然后继续下一个点。成功行记录目标 workflow 的 `run_dir` 和扁平化的 `summary.*` 字段。
+
 ## Analysis Workflow
 
 入口：
@@ -162,6 +210,7 @@ uv run v1-simulation train --config configs/train_bcm.yaml -o batch_size=4
 uv run v1-simulation simulate --config configs/simulate_grating.yaml -o solver.backend=scipy
 uv run v1-simulation analyze --config configs/analyze_louvain.yaml -o analysis.osi_threshold=0.3
 uv run v1-simulation full --config configs/full.yaml --no-progress
+uv run v1-simulation sweep --config configs/sweep_simulate.yaml -o parameters.grating.visual_gain=[100.0,200.0]
 ```
 
 CLI 使用 `OmegaConf.load(...)` 和 `OmegaConf.from_dotlist(...)` 做 YAML + `key=value` override，然后递归构造对应 workflow dataclass。这里没有全局 schema，也不接管 random seed；主程序仍应在进入 workflow 前统一设置全局 seed。
@@ -170,4 +219,4 @@ CLI 使用 `OmegaConf.load(...)` 和 `OmegaConf.from_dotlist(...)` 做 YAML + `k
 
 Workflow 层不创建局部 RNG，也没有 `seed` 字段。随机性来自 model/input/background 中已有的全局 `np.random` 调用，由主程序统一设置 seed。
 
-当前没有实现 sweep、旧 diagnostics、early stop 或 Diffrax 路径。后续迁移这些能力时，应把纯计算放到对应科学模块，workflow 只负责读取 run bundle、调用计算、保存结果。
+当前没有恢复旧 diagnostics、early stop 或 Diffrax 路径。后续迁移这些能力时，应把纯计算放到对应科学模块，workflow 只负责读取 run bundle、调用计算、保存结果。

@@ -1,0 +1,76 @@
+train:
+  run_root: runs
+  empirical_data_path: data/sample_data.pkl
+  model:
+    l4:
+      n_side: 2
+      region_size: 1.0
+      all_tuned: true
+      n_orientations: 4
+    l23:
+      n_side: 2
+      inhibitory_fraction: 0.0
+      region_size: 1.0
+      random_inhibitory: false
+    p_ee: 0.0
+    weight:
+      base_strength: 0.1
+  natural_images:
+    image_dir: data/vanhateren_iml
+    image_shape: [1024, 1536]
+    crop_size: 16
+    patches_per_image: 1
+    limit: 1
+    receptive_field:
+      stimulus_size: 0.5
+      resolution: 7
+      gabor:
+        sigma: 0.2
+        gamma: 1.0
+        spatial_frequency: 1.0
+        phase: 0.0
+    preprocess:
+      resolution: 16
+      normalization: maxscale
+    drive:
+      visual_gain: 0.01
+      baseline_rate: 0.1
+    cache_dir: data/.projection_cache
+  solver:
+    backend: scipy
+    scipy_method: RK4
+    store_trajectory: false
+  learning:
+    kind: bcm
+    bcm:
+      theta_init: 1.0
+      eta: 0.00001
+      row_sum_max_scale: null
+  background:
+    enabled: false
+  time: [0.0, 0.01, 0.02]
+  batch_size: 1
+  epochs: 1
+simulate:
+  run_root: runs
+  empirical_data_path: data/sample_data.pkl
+  model_checkpoint: null
+  solver:
+    backend: scipy
+    scipy_method: RK4
+    store_trajectory: true
+  grating:
+    baseline_rate: 0.1
+    visual_gain: 1.0
+    n_orientations: 4
+    receptive_field:
+      stimulus_size: 0.5
+      resolution: 7
+      gabor:
+        sigma: 0.2
+        gamma: 1.0
+        spatial_frequency: 1.0
+        phase: 0.0
+  background:
+    enabled: false
+  time: [0.0, 0.01, 0.02]

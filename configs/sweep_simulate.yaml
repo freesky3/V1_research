@@ -1,0 +1,41 @@
+workflow: simulate
+run_root: runs
+base:
+  run_root: runs
+  empirical_data_path: data/sample_data.pkl
+  model:
+    l4:
+      n_side: 2
+      region_size: 1.0
+      all_tuned: true
+      n_orientations: 4
+    l23:
+      n_side: 2
+      inhibitory_fraction: 0.0
+      region_size: 1.0
+      random_inhibitory: false
+    p_ee: 0.0
+    weight:
+      base_strength: 0.1
+  solver:
+    backend: scipy
+    scipy_method: RK4
+    store_trajectory: true
+  grating:
+    baseline_rate: 0.1
+    visual_gain: 1.0
+    n_orientations: 4
+    receptive_field:
+      stimulus_size: 0.5
+      resolution: 7
+      gabor:
+        sigma: 0.2
+        gamma: 1.0
+        spatial_frequency: 1.0
+        phase: 0.0
+  background:
+    enabled: false
+  time: [0.0, 0.01, 0.02]
+parameters:
+  grating.visual_gain: [0.5, 1.0]
+  solver.store_trajectory: [false, true]
