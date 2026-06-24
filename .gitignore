@@ -1,0 +1,32 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv
+
+# Local environment and secrets
+.env
+.env.*
+
+# Research outputs and generated arrays
+runs/
+outputs/
+artifacts/
+
+# Input datasets and projection caches
+data/vanhateren_iml/
+data/**/*.iml
+data/.gabor_cache/
+data/.projection_cache/
+.cache/
