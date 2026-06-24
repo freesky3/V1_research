@@ -168,3 +168,52 @@ uv run python -m compileall src tests
 - 目标仓库 `.gitignore` 忽略了整个 `docs/`，所以 `docs/dynamics.md` 和 `docs/handoff.md` 需要用 `git add -f` 显式纳入提交。
 - 当前环境没有安装 JAX；JAX/SciPy 数值对照测试用 `pytest.skip(...)` 显式跳过。安装 optional JAX extra 后，这个测试会实际比较 `JaxRK4Solver` 与 `ScipySolver(method="RK4")`。
 - `compileall` 会在 `src/` 和 `tests/` 下生成 `__pycache__`，提交前已清理；后续验证后也要留意清理生成缓存。
+
+# Learning 层迁移交接
+
+本轮新增 `src/v1_research/learning/`，把 BCM 从旧项目 trainer 风格逻辑里拆成一个可切换的 `LearningRule` 实现，并新增一个薄训练 workflow helper：
+
+- `learning/rules.py`：`RateBatch`、`LearningUpdate`、`LearningRule` 协议。`RateBatch` 使用 batch-first shape：`exc=(n_batch, n_exc)`、`inh=(n_batch, n_inh)`、`external=(n_batch, n_input)`。
+- `learning/bcm.py`：`BCMConfig`、`BCMState`、`BCMRowSumLimits`、`BCMLearningRule` 和 BCM 纯计算函数。
+- `learning/config.py`：`LearningConfig(kind="bcm")` 和 `make_learning_rule(...)`。当前只用显式 `if cfg.kind == "bcm"`，不要引入 registry。
+- `workflows/train.py`：`apply_learning_rule(...)` 和 `solve_and_learn_batch(...)`。这里不出现 BCM 公式，只依赖 `LearningRule` 协议。
+- `docs/learning.md`：当前 learning 层逻辑文档。
+
+关键约定：
+
+- BCM 只更新 excitatory source recurrent efferents：`E <- E` 和 `I <- E`。不更新 inhibitory source block，也不更新 L4 input block。
+- `BCMState` 保存 theta 和初始化时从模型权重得到的 row-sum caps；`BCMLearningRule` 本身不保存训练状态，避免同一个 rule 对象复用时串模型状态。
+- 本轮没有迁移旧 `JAXBCMUpdater`、bad-batch 过滤、steady-state 诊断、checkpoint、CSV log 或完整 natural-image training loop。
+- Learning 层不创建局部 RNG，也没有 seed 字段。给定 model 和 rates 后 BCM 是确定性的。
+
+新增测试：
+
+- `tests/test_learning_bcm.py`：theta 初始化、pre/post theta update、plastic block 选择、topology 外保持 0、`w_max`、row-sum caps、factory。
+- `tests/test_workflows_train.py`：用 fake learning rule 验证 workflow 只依赖协议，首次 batch 只初始化，后续 batch 替换 model/state。
+
+遇到的坑和解决方式：
+
+- 一开始 `BCMLearningRule` 内部缓存了 row-sum caps，后来用测试发现同一个 rule 对象如果初始化两个不同 model，会混用第二个模型的 caps。已改为把 caps 放进 `BCMState`。
+- 测试里手算 inhibitory theta 第二列时曾算错，targeted test 暴露后按 `mean(rates ** 2)` 公式修正了期望。
+- 当前 `.gitignore` 忽略了整个 `docs/`，所以 `docs/learning.md` 和更新后的 `docs/handoff.md` 提交时需要 `git add -f`。
+- `compileall` 仍会生成 `__pycache__`；提交前已清理，后续也要注意。
+
+最近一次验证：
+
+```powershell
+uv run pytest tests/test_learning_bcm.py tests/test_workflows_train.py -q
+uv run pytest
+uv run python -m compileall src tests
+```
+
+结果：
+
+- targeted learning/workflow tests：9 passed。
+- 全量 pytest：37 passed, 1 skipped。
+- compileall：通过。
+
+后续建议：
+
+- 下一步如果迁移完整训练 workflow，让自然图像 batch、solver、artifact 保存都在 `workflows/` 或 run bundle 层组装；不要把 BCM 公式写回 trainer。
+- 如果要加入 `JaxBCMLearningRule`，实现同一个 `LearningRule` 协议，并只扩展 `make_learning_rule(...)` 分支。
+- 后续 Oja/Hebbian 规则可以复用 `RateBatch.external`，但 workflow 不应该知道某个规则是否使用 external rates。
