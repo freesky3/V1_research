@@ -7,8 +7,9 @@
 1. `src/v1_research/runs.py`：run 目录、manifest、CSV、模型 checkpoint 的轻量 IO。
 2. `src/v1_research/workflows/train.py`：natural-image training workflow 和已有 batch helper。
 3. `src/v1_research/workflows/simulate.py`：drifting-grating simulation workflow。
-4. `src/v1_research/workflows/full.py`：先 train 后 simulate 的组合 workflow。
-5. `src/v1_research/cli.py`：Typer + OmegaConf 的命令入口。
+4. `src/v1_research/workflows/analyze.py`：simulation run bundle 的 OSI/Louvain/metrics 分析 workflow。
+5. `src/v1_research/workflows/full.py`：先 train 后 simulate 的组合 workflow。
+6. `src/v1_research/cli.py`：Typer + OmegaConf 的命令入口。
 
 ## Run Bundle
 
@@ -120,6 +121,38 @@ result = run_train_then_simulate(FullWorkflowConfig())
 
 `run_train_then_simulate(...)` 先运行 `run_training(...)`，再把训练输出的 `model/` checkpoint 作为 `SimulationWorkflowConfig.model_checkpoint` 传给 `run_grating_simulation(...)`。它只是组合两个 workflow，不新增训练或仿真的科学逻辑。
 
+## Analysis Workflow
+
+入口：
+
+```python
+from v1_research.workflows import AnalysisWorkflowConfig, run_analysis_workflow
+
+result = run_analysis_workflow(AnalysisWorkflowConfig(simulation_run="runs/simulate/..."))
+```
+
+`AnalysisWorkflowConfig` 位于 `workflows/analyze.py`，组合 simulation run 路径、可选 `output_run_root`、`AnalysisConfig` 和 `save_inputs`。底层 OSI、Louvain、spatial/community metrics 都在 `analysis/` 模块内，workflow 只负责读取 bundle、调用计算、写结果。
+
+数据流：
+
+```text
+AnalysisWorkflowConfig
+-> load_analysis_inputs_from_simulation(...)
+   -> arrays/excitatory_trajectory.npy or arrays/excitatory_rates.npy
+   -> arrays/orientation_angles.npy
+   -> model/state.npz
+-> run_analysis(...)
+-> analysis/ compact arrays and JSON
+-> tables/ensemble_metrics.csv
+-> manifest.json analysis summary
+```
+
+重要 shape：
+
+- `excitatory_trajectory.npy` shape 为 `(n_time, n_orientations, n_exc)`，analysis 内部转成 `(n_exc, n_orientations, n_time)`。
+- 若没有 trajectory，则用 `excitatory_rates.npy` 的 `(n_orientations, n_exc)` 作为单时间点响应，内部 shape 为 `(n_exc, n_orientations, 1)`。
+- analysis 当前只分析 excitatory L2/3 cells，坐标来自 `model.layout.l23.coords[layout.exc_idx]`。
+
 ## CLI
 
 入口在 `src/v1_research/cli.py`：
@@ -127,6 +160,7 @@ result = run_train_then_simulate(FullWorkflowConfig())
 ```powershell
 uv run v1-simulation train --config configs/train_bcm.yaml -o batch_size=4
 uv run v1-simulation simulate --config configs/simulate_grating.yaml -o solver.backend=scipy
+uv run v1-simulation analyze --config configs/analyze_louvain.yaml -o analysis.osi_threshold=0.3
 uv run v1-simulation full --config configs/full.yaml --no-progress
 ```
 
@@ -136,4 +170,4 @@ CLI 使用 `OmegaConf.load(...)` 和 `OmegaConf.from_dotlist(...)` 做 YAML + `k
 
 Workflow 层不创建局部 RNG，也没有 `seed` 字段。随机性来自 model/input/background 中已有的全局 `np.random` 调用，由主程序统一设置 seed。
 
-当前没有实现完整 analysis workflow、Louvain/OSI、sweep、旧 diagnostics、early stop 或 Diffrax 路径。后续迁移这些能力时，应把纯计算放到 `analysis/` 或对应科学模块，workflow 只负责读取 run bundle、调用计算、保存结果。
+当前没有实现 sweep、旧 diagnostics、early stop 或 Diffrax 路径。后续迁移这些能力时，应把纯计算放到对应科学模块，workflow 只负责读取 run bundle、调用计算、保存结果。

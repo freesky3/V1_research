@@ -10,6 +10,7 @@ import numpy as np
 import typer
 from omegaconf import OmegaConf
 
+from v1_research.workflows.analyze import AnalysisWorkflowConfig, run_analysis_workflow
 from v1_research.workflows.full import FullWorkflowConfig, run_train_then_simulate
 from v1_research.workflows.simulate import SimulationWorkflowConfig, run_grating_simulation
 from v1_research.workflows.train import TrainingWorkflowConfig, run_training
@@ -39,6 +40,18 @@ def simulate(
 
     cfg = load_workflow_config(config, overrides or [], SimulationWorkflowConfig)
     result = run_grating_simulation(cfg)
+    typer.echo(result.run_dir)
+
+
+@app.command()
+def analyze(
+    config: Annotated[Path, typer.Option("--config", "-c", exists=True, dir_okay=False)],
+    overrides: Annotated[list[str] | None, typer.Option("--override", "-o")] = None,
+) -> None:
+    """Analyze a grating simulation run."""
+
+    cfg = load_workflow_config(config, overrides or [], AnalysisWorkflowConfig)
+    result = run_analysis_workflow(cfg)
     typer.echo(result.run_dir)
 
 
@@ -131,6 +144,7 @@ __all__ = [
     "dataclass_from_mapping",
     "load_workflow_config",
     "main",
+    "run_analysis_workflow",
     "run_grating_simulation",
     "run_train_then_simulate",
     "run_training",

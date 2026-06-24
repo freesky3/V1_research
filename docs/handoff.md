@@ -264,3 +264,80 @@ rg -n "default_rng|SeedSequence|seed\s*:|seed\s*=|np\.random\.Generator" src\v1_
 - 全量 pytest：43 passed, 1 skipped。
 - compileall：通过。
 - RNG/seed 扫描：无新增局部 RNG/seed 字段输出。
+
+# Analysis 主链路迁移交接
+
+本轮新增 `src/v1_research/analysis/` 和 `src/v1_research/workflows/analyze.py`，迁移主分析链路：
+
+- `analysis/osi.py`：`compute_osi(...)`，用 circular variance 计算 OSI，并返回 preferred simulated direction。
+- `analysis/communities.py`：`LouvainConfig`、`CommunityResult`、cosine/Pearson similarity、agreement matrix、consensus Louvain 和 cluster pruning。
+- `analysis/spatial.py`：distance matrix、center index selection、per-community spatial compactness metrics。
+- `analysis/metrics.py`：activity health、OSI distribution、community summary、`metrics.json` 和 `ensemble_metrics.csv` 写盘。
+- `analysis/pipeline.py`：`AnalysisConfig`、`AnalysisInputs`、`AnalysisResult`、`run_analysis(...)` 和 `load_analysis_inputs_from_simulation(...)`。
+- `analysis/artifacts.py`：写 `analysis/` 下的 compact arrays/JSON，并把 ensemble table 写到 `tables/ensemble_metrics.csv`。
+- `workflows/analyze.py`：`AnalysisWorkflowConfig` 和 `run_analysis_workflow(...)`，从 simulation run bundle 读取数据、调用 analysis、写结果并更新 manifest。
+- `src/v1_research/cli.py`：新增 `v1-simulation analyze --config ... -o ...`。
+
+关键数据流：
+
+```text
+runs/simulate/<timestamp>
+-> arrays/excitatory_trajectory.npy or arrays/excitatory_rates.npy
+-> arrays/orientation_angles.npy
+-> model/state.npz
+-> load_analysis_inputs_from_simulation(...)
+-> run_analysis(...)
+-> analysis/*.npy / *.json
+-> tables/ensemble_metrics.csv
+-> manifest.json analysis summary
+```
+
+shape 约定：
+
+- simulation trajectory shape 是 `(n_time, n_orientations, n_exc)`；analysis 内部转为 `(n_exc, n_orientations, n_time)`。
+- 若没有 trajectory，fallback 到 `excitatory_rates.npy`，其 shape 为 `(n_orientations, n_exc)`；analysis 内部作为单时间点响应 `(n_exc, n_orientations, 1)`。
+- 当前只分析 excitatory L2/3 cells；坐标和距离从 checkpoint 的 `model.layout.l23` 按 `layout.exc_idx` 取。
+
+随机性约定：
+
+- Analysis 层没有 `seed` 字段，不接 `rng`，不创建 `np.random.default_rng(...)`。
+- Louvain 直接调用 BCT 默认随机路径；BCT 在未显式传 seed 时使用 NumPy 全局随机状态，因此由主程序入口的 `set_seed(CONFIG["seed"])` 统一控制。
+- `select_analysis_neuron_indices(...)` 在 `random_sample_fraction < 1` 时使用全局 `np.random.choice`。
+
+本轮刻意没有迁移：
+
+- `frames_sorted.py`。
+- plotting-heavy diagnostics。
+- spatial surrogate plots。
+- reference-analysis matching。
+- all-cell DG/OU sweep scripts。
+
+遇到的坑和解决方式：
+
+- 一开始测试文件误通过相对 patch 路径落到了旧仓库 `train_simulation_analysis`。已用 `git restore` 恢复旧仓库被改的旧测试，并删除误建的 `tests/test_workflows_analyze.py`；之后所有 patch 都用 `../V1_simulation/...` 目标路径。
+- BCT `consensus_und` 在 `reps=1` 时内部会把候选 partition squeeze 成一维，触发 `AxisError`。解决方式是在调用 BCT consensus 时使用 `max(2, cfg.consensus_reps)`，但 diagnostics 仍记录用户配置的 `consensus_reps`。
+- `.gitignore` 当前忽略了整个 `docs/`，所以新增 `docs/analysis.md` 和更新后的文档提交时需要 `git add -f`。本轮没有把已有 `.gitignore` 改动纳入提交。
+- `compileall` 会生成 `__pycache__`；验证后已清理，后续验证后也要继续清理。
+
+新增测试：
+
+- `tests/test_analysis_osi.py`
+- `tests/test_analysis_clusters.py`
+- `tests/test_analysis_metrics.py`
+- `tests/test_workflows_analyze.py`
+
+最近一次验证：
+
+```powershell
+uv run pytest tests/test_analysis_osi.py tests/test_analysis_metrics.py tests/test_analysis_clusters.py tests/test_workflows_analyze.py tests/test_cli_workflows.py -q
+uv run pytest -q
+uv run python -m compileall src tests
+rg -n "default_rng|SeedSequence|seed\s*:|seed\s*=|np\.random\.Generator" src\v1_research tests
+```
+
+结果：
+
+- targeted analysis/CLI tests：16 passed。
+- 全量 pytest：57 passed, 1 skipped。
+- compileall：通过。
+- RNG/seed 扫描：无输出。

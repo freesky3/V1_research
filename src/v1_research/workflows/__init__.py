@@ -1,5 +1,6 @@
 """Workflow orchestration helpers."""
 
+from v1_research.workflows.analyze import AnalysisRun, AnalysisWorkflowConfig, run_analysis_workflow
 from v1_research.workflows.full import FullRun, FullWorkflowConfig, run_train_then_simulate
 from v1_research.workflows.simulate import SimulationRun, SimulationWorkflowConfig, run_grating_simulation
 from v1_research.workflows.train import (
@@ -12,6 +13,8 @@ from v1_research.workflows.train import (
 )
 
 __all__ = [
+    "AnalysisRun",
+    "AnalysisWorkflowConfig",
     "FullRun",
     "FullWorkflowConfig",
     "NaturalImageWorkflowConfig",
@@ -20,6 +23,7 @@ __all__ = [
     "TrainingRun",
     "TrainingWorkflowConfig",
     "apply_learning_rule",
+    "run_analysis_workflow",
     "run_grating_simulation",
     "run_train_then_simulate",
     "run_training",
