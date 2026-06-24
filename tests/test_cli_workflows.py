@@ -27,6 +27,7 @@ def test_cli_loads_config_applies_override_and_dispatches_train(tmp_path, monkey
     def fake_run_training(cfg, *, show_progress: bool = True):
         captured["batch_size"] = cfg.batch_size
         captured["l4_n_side"] = cfg.model.l4.n_side
+        captured["min_active"] = cfg.inspection.health.min_active_neuron_fraction
         captured["show_progress"] = show_progress
 
         class Result:
@@ -38,11 +39,20 @@ def test_cli_loads_config_applies_override_and_dispatches_train(tmp_path, monkey
 
     result = CliRunner().invoke(
         cli.app,
-        ["train", "--config", str(config_path), "-o", "batch_size=3", "--no-progress"],
+        [
+            "train",
+            "--config",
+            str(config_path),
+            "-o",
+            "batch_size=3",
+            "-o",
+            "inspection.health.min_active_neuron_fraction=0.2",
+            "--no-progress",
+        ],
     )
 
     assert result.exit_code == 0, result.output
-    assert captured == {"batch_size": 3, "l4_n_side": 1, "show_progress": False}
+    assert captured == {"batch_size": 3, "l4_n_side": 1, "min_active": 0.2, "show_progress": False}
     assert str(tmp_path / "runs" / "train" / "demo") in result.output
 
 

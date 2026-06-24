@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable, Sequence
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -27,16 +28,23 @@ from v1_research.inputs.natural_images import (
 from v1_research.learning import LearningConfig, LearningRule, LearningUpdate, RateBatch, make_learning_rule
 from v1_research.learning.bcm import BCMState
 from v1_research.learning.diagnostics import (
+    TrainingHealthConfig,
     TrackedWeight,
     active_rate_stats,
+    bcm_signal_stats,
+    evaluate_training_health,
+    extended_active_rate_stats,
+    extended_plastic_weight_stats,
     plastic_weight_stats,
     record_tracked_weights,
     row_sum_pressure,
     sample_tracked_weights,
+    theta_distribution_stats,
     theta_stats,
     weight_delta_stats,
 )
 from v1_research.model import ModelConfig, ModelState, build_model
+from v1_research.model.weights import as_dense_weights
 from v1_research.runs import (
     create_run_dir,
     model_summary,
@@ -44,6 +52,7 @@ from v1_research.runs import (
     save_model_state,
     write_config,
     write_csv_rows,
+    write_json,
     write_manifest,
 )
 
@@ -72,6 +81,7 @@ class TrainingInspectionConfig:
 
     enabled: bool = False
     probe_every: int = 1
+    health: TrainingHealthConfig = field(default_factory=TrainingHealthConfig)
     tracked_weight_count: int = 0
     save_plots: bool = False
     save_per_batch_arrays: bool = False
@@ -102,7 +112,7 @@ class TrainingRun:
     run_dir: Path
     model: ModelState
     learning_state: object
-    summary: dict[str, int | float | list[int]]
+    summary: dict[str, Any]
     log_path: Path
     model_path: Path
 
@@ -246,6 +256,8 @@ def run_training(cfg: TrainingWorkflowConfig, *, show_progress: bool = True) -> 
                         state=state,
                         rates=rates,
                         active_threshold=cfg.inspection.active_rate_threshold,
+                        near_rate_cap=_near_rate_cap(cfg.solver, cfg.inspection.health),
+                        bcm_cfg=cfg.learning.bcm,
                     )
                 )
                 if cfg.inspection.save_per_batch_arrays:
@@ -255,26 +267,42 @@ def run_training(cfg: TrainingWorkflowConfig, *, show_progress: bool = True) -> 
     log_path = write_csv_rows(run_dir / "tables" / "training_log.csv", log_rows)
     diagnostic_path = None
     tracked_path = None
+    health_path = None
+    health_events_path = None
+    health_report: dict[str, object] | None = None
     figure_paths: dict[str, Path] = {}
     if cfg.inspection.enabled:
         diagnostic_path = write_csv_rows(run_dir / "tables" / "training_diagnostics.csv", diagnostic_rows)
+        health_report = evaluate_training_health(diagnostic_rows, cfg.inspection.health)
+        health_path = write_json(run_dir / "analysis" / "training_health.json", health_report)
+        health_events = health_report.get("events", []) if isinstance(health_report, dict) else []
+        health_events_path = write_csv_rows(
+            run_dir / "tables" / "training_health_events.csv",
+            health_events if isinstance(health_events, list) else [],
+        )
         if tracked_rows:
             tracked_path = write_csv_rows(run_dir / "tables" / "tracked_weights.csv", tracked_rows)
         if cfg.inspection.save_plots:
-            figure_paths = _save_training_figures(run_dir, diagnostic_rows, tracked_rows)
+            figure_paths = _save_training_figures(run_dir, diagnostic_rows, tracked_rows, health_report=health_report)
     model_path = save_model_state(run_dir / "model", model, metadata={"batches": batches, "samples_seen": samples_seen})
-    summary: dict[str, int | float | list[int]] = {
+    summary: dict[str, Any] = {
         "epochs": int(cfg.epochs),
         "batches": batches,
         "samples_seen": samples_seen,
         "time_steps": int(time.size),
     }
+    if health_report is not None:
+        summary.update(_training_health_summary(health_report))
     outputs = {
         "training_log": relative_output_path(log_path, run_dir),
         "model": relative_output_path(model_path, run_dir),
     }
     if diagnostic_path is not None:
         outputs["training_diagnostics"] = relative_output_path(diagnostic_path, run_dir)
+    if health_path is not None:
+        outputs["training_health"] = relative_output_path(health_path, run_dir)
+    if health_events_path is not None:
+        outputs["training_health_events"] = relative_output_path(health_events_path, run_dir)
     if tracked_path is not None:
         outputs["tracked_weights"] = relative_output_path(tracked_path, run_dir)
     if per_batch_arrays:
@@ -353,16 +381,29 @@ def _training_diagnostic_row(
     state: object,
     rates: RateBatch,
     active_threshold: float,
+    near_rate_cap: float | None,
+    bcm_cfg: object,
 ) -> dict[str, object]:
     row: dict[str, object] = {"epoch": int(epoch), "batch": int(batch), "step": int(step)}
     row.update(active_rate_stats(rates, active_threshold=active_threshold))
+    row.update(
+        extended_active_rate_stats(
+            rates,
+            active_threshold=active_threshold,
+            near_rate_cap=near_rate_cap,
+        )
+    )
     row.update(plastic_weight_stats(model))
     row.update(weight_delta_stats(previous_model, model))
     if isinstance(state, BCMState):
         row.update(theta_stats(state))
+        row.update(theta_distribution_stats(state))
         row.update(row_sum_pressure(model, state=state))
+        row.update(_extended_model_plastic_stats(previous_model, model, state=state))
+        row.update(bcm_signal_stats(rates, state, bcm_cfg))
     else:
         row.update(row_sum_pressure(model))
+        row.update(_extended_model_plastic_stats(previous_model, model, state=None))
     return row
 
 
@@ -370,6 +411,8 @@ def _save_training_figures(
     run_dir: Path,
     diagnostics: list[dict[str, object]],
     tracked: list[dict[str, object]],
+    *,
+    health_report: dict[str, object] | None = None,
 ) -> dict[str, Path]:
     if not diagnostics:
         return {}
@@ -385,16 +428,87 @@ def _save_training_figures(
     steps = [int(row["step"]) for row in diagnostics]
 
     overview = figure_dir / "training_overview.png"
-    fig, ax = plt.subplots(figsize=(7.0, 4.0), dpi=140)
-    ax.plot(steps, [float(row.get("W_EE_mean", 0.0)) for row in diagnostics], label="W_EE")
-    ax.plot(steps, [float(row.get("W_IE_mean", 0.0)) for row in diagnostics], label="W_IE")
-    ax.plot(steps, [float(row.get("theta_exc_median", 0.0)) for row in diagnostics], label="theta E")
-    ax.set_xlabel("Batch")
-    ax.legend()
+    fig, axes = plt.subplots(2, 2, figsize=(10.0, 6.0), dpi=140)
+    active_has_series = _plot_series(axes[0, 0], steps, diagnostics, ["exc_active_neuron_fraction", "inh_active_neuron_fraction"])
+    axes[0, 0].set_title("Active fraction")
+    concentration_has_series = _plot_series(axes[0, 1], steps, diagnostics, ["exc_top1_activity_fraction", "exc_top5_activity_fraction"])
+    axes[0, 1].set_title("Activity concentration")
+    cap_has_series = _plot_series(axes[1, 0], steps, diagnostics, ["row_sum_EE_cap_max_ratio", "row_sum_IE_cap_max_ratio"])
+    axes[1, 0].set_title("Row-sum cap ratio")
+    theta_has_series = _plot_series(axes[1, 1], steps, diagnostics, ["theta_exc_median", "theta_inh_median"])
+    axes[1, 1].set_title(f"Health: {_health_status_text(health_report)}")
+    for ax, has_series in zip(
+        axes.ravel(),
+        [active_has_series, concentration_has_series, cap_has_series, theta_has_series],
+        strict=True,
+    ):
+        ax.set_xlabel("Batch")
+        if has_series:
+            ax.legend()
     fig.tight_layout()
     fig.savefig(overview)
     plt.close(fig)
     paths["training_overview"] = overview
+
+    activity = figure_dir / "training_activity.png"
+    fig, axes = plt.subplots(2, 1, figsize=(8.0, 6.0), dpi=140)
+    exc_rate_has_series = _plot_series(axes[0], steps, diagnostics, ["exc_mean", "exc_median", "exc_p95", "exc_max"])
+    axes[0].set_title("Excitatory rates")
+    inh_rate_has_series = _plot_series(axes[1], steps, diagnostics, ["inh_mean", "inh_median", "inh_p95", "inh_max"])
+    axes[1].set_title("Inhibitory rates")
+    for ax, has_series in zip(axes, [exc_rate_has_series, inh_rate_has_series], strict=True):
+        ax.set_xlabel("Batch")
+        if has_series:
+            ax.legend()
+    fig.tight_layout()
+    fig.savefig(activity)
+    plt.close(fig)
+    paths["training_activity"] = activity
+
+    bcm = figure_dir / "training_bcm.png"
+    fig, axes = plt.subplots(2, 1, figsize=(8.0, 6.0), dpi=140)
+    theta_dist_has_series = _plot_series(axes[0], steps, diagnostics, ["theta_exc_p05", "theta_exc_median", "theta_exc_p95"])
+    axes[0].set_title("Excitatory theta")
+    bcm_signal_has_series = _plot_series(axes[1], steps, diagnostics, ["bcm_exc_above_theta_fraction", "bcm_exc_signal_mean"])
+    axes[1].set_title("BCM signal")
+    for ax, has_series in zip(axes, [theta_dist_has_series, bcm_signal_has_series], strict=True):
+        ax.set_xlabel("Batch")
+        if has_series:
+            ax.legend()
+    fig.tight_layout()
+    fig.savefig(bcm)
+    plt.close(fig)
+    paths["training_bcm"] = bcm
+
+    plasticity = figure_dir / "training_plasticity.png"
+    fig, axes = plt.subplots(2, 1, figsize=(8.0, 6.0), dpi=140)
+    ee_has_series = _plot_series(axes[0], steps, diagnostics, ["W_EE_p05", "W_EE_median", "W_EE_p95", "W_EE_max"])
+    axes[0].set_title("E<-E weights")
+    ie_has_series = _plot_series(axes[1], steps, diagnostics, ["W_IE_p05", "W_IE_median", "W_IE_p95", "W_IE_max"])
+    axes[1].set_title("I<-E weights")
+    for ax, has_series in zip(axes, [ee_has_series, ie_has_series], strict=True):
+        ax.set_xlabel("Batch")
+        if has_series:
+            ax.legend()
+    fig.tight_layout()
+    fig.savefig(plasticity)
+    plt.close(fig)
+    paths["training_plasticity"] = plasticity
+
+    row_sums = figure_dir / "training_row_sums.png"
+    fig, axes = plt.subplots(2, 1, figsize=(8.0, 6.0), dpi=140)
+    ee_row_has_series = _plot_series(axes[0], steps, diagnostics, ["W_EE_row_sum_mean", "W_EE_row_sum_p95", "W_EE_row_sum_max"])
+    axes[0].set_title("E<-E row sums")
+    ie_row_has_series = _plot_series(axes[1], steps, diagnostics, ["W_IE_row_sum_mean", "W_IE_row_sum_p95", "W_IE_row_sum_max"])
+    axes[1].set_title("I<-E row sums")
+    for ax, has_series in zip(axes, [ee_row_has_series, ie_row_has_series], strict=True):
+        ax.set_xlabel("Batch")
+        if has_series:
+            ax.legend()
+    fig.tight_layout()
+    fig.savefig(row_sums)
+    plt.close(fig)
+    paths["training_row_sums"] = row_sums
 
     if tracked:
         tracked_path = figure_dir / "tracked_weights.png"
@@ -416,6 +530,97 @@ def _save_training_figures(
         plt.close(fig)
         paths["tracked_weights_figure"] = tracked_path
     return paths
+
+
+def _extended_model_plastic_stats(
+    previous_model: ModelState,
+    model: ModelState,
+    *,
+    state: BCMState | None,
+) -> dict[str, object]:
+    previous = as_dense_weights(previous_model.weights)
+    current = as_dense_weights(model.weights)
+    exc = model.layout.exc_idx
+    inh = model.layout.inh_idx
+    ee_limits = state.row_sum_limits.target_exc_source_exc if state is not None else None
+    ie_limits = state.row_sum_limits.target_inh_source_exc if state is not None else None
+    return {
+        **extended_plastic_weight_stats(
+            "W_EE",
+            current[np.ix_(exc, exc)],
+            previous=previous[np.ix_(exc, exc)],
+            row_sum_limits=ee_limits,
+        ),
+        **extended_plastic_weight_stats(
+            "W_IE",
+            current[np.ix_(inh, exc)],
+            previous=previous[np.ix_(inh, exc)],
+            row_sum_limits=ie_limits,
+        ),
+    }
+
+
+def _near_rate_cap(solver_cfg: SolverConfig, health_cfg: TrainingHealthConfig) -> float | None:
+    rate_max = solver_cfg.transfer.rate_max
+    if rate_max is None:
+        return None
+    return float(rate_max) * float(health_cfg.near_rate_cap_ratio)
+
+
+def _training_health_summary(report: dict[str, object]) -> dict[str, object]:
+    final_metrics = report.get("final_metrics", {})
+    summary: dict[str, object] = {
+        "health_status": report.get("status"),
+        "health_warning_count": int(report.get("warning_count", 0) or 0),
+        "health_failure_count": int(report.get("failure_count", 0) or 0),
+        "first_health_warning_step": report.get("first_warning_step"),
+        "first_health_failure_step": report.get("first_failure_step"),
+    }
+    if isinstance(final_metrics, dict):
+        for key in (
+            "exc_active_neuron_fraction",
+            "inh_active_neuron_fraction",
+            "exc_top1_activity_fraction",
+            "exc_top5_activity_fraction",
+        ):
+            if key in final_metrics:
+                summary[f"final_{key}"] = final_metrics[key]
+    return summary
+
+
+def _plot_series(ax, steps: list[int], rows: list[dict[str, object]], names: list[str]) -> bool:
+    plotted = False
+    for name in names:
+        x: list[int] = []
+        y: list[float] = []
+        for step, row in zip(steps, rows, strict=True):
+            value = _numeric_value(row.get(name))
+            if value is None:
+                continue
+            x.append(step)
+            y.append(value)
+        if y:
+            ax.plot(x, y, label=name)
+            plotted = True
+    if not plotted:
+        ax.text(0.5, 0.5, "no data", transform=ax.transAxes, ha="center", va="center")
+    return plotted
+
+
+def _numeric_value(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        converted = float(value)
+    except (TypeError, ValueError):
+        return None
+    return converted if np.isfinite(converted) else None
+
+
+def _health_status_text(report: dict[str, object] | None) -> str:
+    if report is None:
+        return "unknown"
+    return str(report.get("status", "unknown"))
 
 
 def _save_training_probe_arrays(

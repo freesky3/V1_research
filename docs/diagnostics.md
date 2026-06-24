@@ -1,23 +1,24 @@
-# 训练与分析诊断说明
+# 训练诊断与健康报告
 
-本文说明当前外围诊断脚本迁移后的正式入口。旧 `scripts/` 没有整体搬入新项目；可复用的计算被拆进 `learning/`、`analysis/` 和 `workflows/`，一次性画图或硬编码 run 名的脚本仍应留在旧项目或 scratch。
+本文说明当前训练阶段的诊断代码如何组织，以及 `inspection.enabled=true` 时 run bundle 会写出哪些健康报告、表格和机制图。它面向需要判断训练是否过于静默、过度活跃、活动过度集中，或 BCM row-sum cap 压力过大的研究者。
 
 ## 推荐阅读顺序
 
-1. `src/v1_research/learning/diagnostics.py`：训练中间过程的纯计算指标。
-2. `src/v1_research/workflows/train.py`：`TrainingInspectionConfig` 如何把指标接到 run bundle。
-3. `src/v1_research/analysis/overlap.py`：ensemble label overlap、contingency、ARI 和 surrogate significance。
-4. `src/v1_research/analysis/temporal.py`：复用主分析 pipeline 的稳态窗口敏感性计算。
-5. `src/v1_research/workflows/summarize.py`：只读 run bundle 的统一 summary 入口。
+1. `src/v1_research/workflows/train.py`：从 `TrainingWorkflowConfig`、`TrainingInspectionConfig` 和 `run_training(...)` 看训练入口与落盘逻辑。
+2. `src/v1_research/learning/diagnostics.py`：看纯诊断函数、`TrainingHealthConfig` 和 `evaluate_training_health(...)`。
+3. `src/v1_research/learning/bcm.py`：看 BCM state、theta、row-sum cap 与 plastic weight 更新机制。
+4. `src/v1_research/workflows/summarize.py`：看 run bundle 如何被压缩成 sweep 友好的 summary。
+5. `docs/learning.md` 与 `docs/workflows.md`：补充理解训练规则和 CLI workflow 边界。
 
-## 训练 inspection
+## 入口与配置
 
-入口配置位于 `src/v1_research/workflows/train.py`：
+训练 workflow 的入口函数是 `run_training(cfg: TrainingWorkflowConfig, *, show_progress=True)`。本地诊断配置挂在 `TrainingWorkflowConfig.inspection`，定义于 `src/v1_research/workflows/train.py`：
 
 ```python
 TrainingInspectionConfig(
     enabled=False,
     probe_every=1,
+    health=TrainingHealthConfig(),
     tracked_weight_count=0,
     save_plots=False,
     save_per_batch_arrays=False,
@@ -25,33 +26,110 @@ TrainingInspectionConfig(
 )
 ```
 
-默认关闭，且 `save_plots=False`。这保证 sweep 或批量训练不会自动生成大量图片。研究者做单次诊断时显式打开即可。
+健康阈值由 `src/v1_research/learning/diagnostics.py` 中的 `TrainingHealthConfig` 定义，默认偏向“早提醒”：
 
-数据流：
+```python
+TrainingHealthConfig(
+    min_active_neuron_fraction=0.05,
+    max_active_neuron_fraction=0.95,
+    max_top1_activity_fraction=0.35,
+    max_top5_activity_fraction=0.75,
+    max_row_sum_cap_fraction=0.05,
+    max_row_sum_cap_ratio=0.95,
+    near_rate_cap_ratio=0.95,
+    max_near_rate_cap_fraction=0.05,
+)
+```
+
+这些字段可以写进 YAML，也可以用 CLI override 修改，例如：
+
+```powershell
+uv run v1-simulation train --config configs/train_smoke.yaml `
+  -o inspection.enabled=true `
+  -o inspection.health.min_active_neuron_fraction=0.2
+```
+
+`inspection.enabled=false` 时不写训练诊断表和健康报告。`inspection.save_plots=false` 是默认值，用于避免 sweep 或批量实验自动生成大量图片。需要看机制图时显式打开 `inspection.save_plots=true`。
+
+## 训练诊断数据流
+
+每个 inspected batch 的数据流如下：
 
 ```text
 run_training(...)
--> solve dynamics for one natural-image batch
--> RateBatch(exc, inh, external)
--> LearningRule.initialize(...) or step(...)
--> if inspection enabled:
+-> build natural-image batch drive
+-> solve_rates(...) 得到 RateBatch(exc, inh, external)
+-> apply_learning_rule(...)
+-> _training_diagnostic_row(...)
    -> active_rate_stats(...)
+   -> extended_active_rate_stats(...)
    -> plastic_weight_stats(...)
    -> weight_delta_stats(previous_model, model)
-   -> theta_stats(...) and row_sum_pressure(...)
-   -> optional sample_tracked_weights(...) / record_tracked_weights(...)
-   -> optional per-probe arrays
+   -> theta_stats(...) / theta_distribution_stats(...)
+   -> row_sum_pressure(...)
+   -> extended_plastic_weight_stats(...)
+   -> bcm_signal_stats(...)
+-> evaluate_training_health(...)
 -> write run bundle
 ```
 
-写盘结果：
+主要数组形状：
+
+- `RateBatch.exc`: `(n_batch, n_exc)`，每个样本的 excitatory rate。
+- `RateBatch.inh`: `(n_batch, n_inh)`，当 `n_inh=0` 时是空 population。
+- `RateBatch.external`: `(n_batch, n_input)`，来自当前 batch 的 L4 external drive。
+- `W_EE`: `(n_exc, n_exc)`，BCM 管理的 `E <- E` plastic block。
+- `W_IE`: `(n_inh, n_exc)`，BCM 管理的 `I <- E` plastic block。
+- `theta_exc`: `(n_exc,)`，`theta_inh`: `(n_inh,)`。
+
+空 population 的扩展诊断字段使用 `None`，并且健康判定会跳过这些字段。这样 `inhibitory_fraction=0.0` 的 smoke 配置不会因为不存在 inhibitory population 而误报。
+
+## training_diagnostics.csv
+
+`tables/training_diagnostics.csv` 每行对应一次 inspected batch。字段按含义分为几类：
+
+- 基本 activity：`exc_mean`、`exc_median`、`exc_max`、`exc_active_fraction`，以及对应的 `inh_*` 字段。
+- per-neuron activity：`exc_active_neuron_count`、`exc_active_neuron_fraction`、`exc_silent_neuron_fraction`，以及对应的 `inh_*` 字段。
+- activity concentration：`exc_top1_activity_fraction`、`exc_top5_activity_fraction`，用于判断少数 neuron 是否吸收了大部分活动。
+- rate cap 压力：`exc_near_rate_cap_fraction`、`inh_near_rate_cap_fraction`。阈值来自 `solver.transfer.rate_max * inspection.health.near_rate_cap_ratio`。
+- external drive 分布：`external_mean`、`external_median`、`external_p05`、`external_p95`、`external_max`。
+- plastic weights：`W_EE_*`、`W_IE_*`，包含非零数量、均值、中位数、最大值、p05/p95、row-sum mean/p95/max。
+- connected delta sign：`W_EE_delta_positive_fraction`、`W_EE_delta_negative_fraction`、`W_EE_delta_zero_fraction`，以及 `W_IE_*` 对应字段。
+- row-sum cap 压力：`row_sum_EE_cap_fraction`、`row_sum_EE_cap_max_ratio`、`row_sum_IE_cap_fraction`、`row_sum_IE_cap_max_ratio`。
+- BCM theta：`theta_exc_mean`、`theta_exc_median`、`theta_exc_p05`、`theta_exc_p95`，以及 `theta_inh_*`。
+- BCM signal：`bcm_exc_above_theta_fraction`、`bcm_exc_signal_mean`、`bcm_exc_signal_abs_mean`，以及 `bcm_inh_*`。
+
+旧的 `active_rate_stats(...)`、`plastic_weight_stats(...)`、`theta_stats(...)` 仍保留，用于兼容已有轻量诊断；扩展函数会补充更适合训练机制解释的字段。
+
+## 健康报告语义
+
+`evaluate_training_health(...)` 只读取 diagnostic rows 和 `TrainingHealthConfig`，不读写磁盘。它会生成：
+
+- `schema_version`
+- `status`: `ok | warn | fail`
+- `thresholds`: 本次使用的阈值快照
+- `warning_count`、`failure_count`
+- `first_warning_step`、`first_failure_step`
+- `final_metrics`: 最后一条 inspected row 的数值字段
+- `worst_metrics`: 每个指标在训练过程中的最差值
+- `events`: 每个触发阈值的事件
+
+健康状态只记录，不 raise，不改变训练完成语义。普通阈值越界是 `warn`，例如 top1/top5 activity concentration 太高、near-rate-cap fraction 太高、row-sum cap 压力过高。明显坏状态是 `fail`，目前包括有效 population 的 `active_neuron_fraction <= 0.0` 或 `>= 1.0`。
+
+事件写入 `tables/training_health_events.csv`。每行包含 `step`、`severity`、`metric`、`value`、`threshold`、`rule` 和 `message`，方便 sweep 后筛选最早异常或最高频异常。
+
+## Run Bundle 产物
+
+开启 `inspection.enabled=true` 后，训练 run 目录会额外包含：
 
 ```text
 runs/train/<timestamp>/
   tables/
-    training_log.csv
-    training_diagnostics.csv        # inspection.enabled=True
-    tracked_weights.csv             # 存在可跟踪 plastic edge 时
+    training_diagnostics.csv
+    training_health_events.csv
+    tracked_weights.csv             # 有 tracked rows 时
+  analysis/
+    training_health.json
   arrays/
     training_probe_000001_exc_rates.npy
     training_probe_000001_inh_rates.npy
@@ -59,116 +137,40 @@ runs/train/<timestamp>/
     ...
   figures/
     training_overview.png           # save_plots=True
-    tracked_weights.png             # save_plots=True 且有 tracked weights
+    training_activity.png           # save_plots=True
+    training_bcm.png                # save_plots=True
+    training_plasticity.png         # save_plots=True
+    training_row_sums.png           # save_plots=True
+    tracked_weights.png             # save_plots=True 且有 tracked rows
 ```
 
-`manifest.json` 只记录这些输出路径和短 summary，不塞大数组。
+`manifest.json.outputs` 会记录 `training_health` 和 `training_health_events` 的相对路径。`manifest.json.summary` 与 `TrainingRun.summary` 会加入 sweep 友好的标量：
 
-## Learning 诊断函数
+- `health_status`
+- `health_warning_count`
+- `health_failure_count`
+- `first_health_warning_step`
+- `first_health_failure_step`
+- `final_exc_active_neuron_fraction`
+- `final_inh_active_neuron_fraction`
+- `final_exc_top1_activity_fraction`
+- `final_exc_top5_activity_fraction`
 
-`learning/diagnostics.py` 中的函数只接收 `ModelState`、`BCMState`、`RateBatch` 或数组，不接 root config，不读写磁盘：
+`workflows/summarize.py` 会读取 `analysis/training_health.json`，并把健康状态、计数、首个事件 step 和 `final_metrics` 展开为 `training_health.*` 字段。这样 `summarize` 和 `sweep` 可以在不解析大 CSV 的情况下比较训练健康状态。
 
-- `active_rate_stats(...)`：E/I firing rate 的 mean、median、max 和 active fraction。
-- `plastic_weight_stats(...)`：`E <- E` 与 `I <- E` plastic block 的非零数量和权重统计。
-- `row_sum_pressure(...)`：每行正权重和，以及相对 BCM row-sum cap 的压力。
-- `cap_fraction(...)`：数组中达到 cap 的数量和比例；cap 数组长度不匹配会直接报错，避免静默错算。
-- `weight_delta_stats(...)`：相邻模型状态之间的 plastic block delta。
-- `theta_stats(...)`：BCM theta 的 mean/median。
-- `sample_tracked_weights(...)`：用全局 `np.random` 从已连接 plastic edges 中抽样。
-- `record_tracked_weights(...)`：读取 tracked edges 的当前权重和相对初值 delta。
+## 机制图
 
-`sample_tracked_weights(...)` 不创建局部 RNG，也不接收 seed。抽中的 tracked sample 在表格内重新编号为 `0..n-1`，便于 CSV 和图例阅读。
+`inspection.save_plots=true` 时，`_save_training_figures(...)` 会基于 `training_diagnostics.csv` 的同一组 rows 生成机制图：
 
-## Overlap 和 ARI
+- `training_overview.png`：active fraction、activity concentration、row-sum cap ratio 和 theta 的健康总览。
+- `training_activity.png`：E/I rate 的 mean、median、p95、max，用于判断整体太静默还是接近 rate cap。
+- `training_bcm.png`：theta p05/median/p95 与 BCM `y * (y - theta)` signal，用于看 rate-vs-theta 的学习方向。
+- `training_plasticity.png`：`W_EE` 和 `W_IE` 的 p05/median/p95/max，用于看权重分布是否塌缩或爆发。
+- `training_row_sums.png`：`W_EE` 和 `W_IE` 的 row-sum mean/p95/max，用于看 row-sum cap 前的压力。
+- `tracked_weights.png`：只在 `tracked_weight_count > 0` 且找到可跟踪 plastic edge 时生成，展示抽样连接随 step 的权重轨迹。
 
-`analysis/overlap.py` 替代旧 `compare_ensemble_overlap.py` 一类脚本中的可复用计算：
-
-```python
-from v1_research.analysis.overlap import compare_label_sets
-
-result = compare_label_sets(
-    reference_labels=labels_a,
-    reference_coords=coords_a,
-    query_labels=labels_b,
-    query_coords=coords_b,
-)
-```
-
-它会先按坐标匹配 cell，再计算：
-
-- matched / unmatched counts
-- non-zero label contingency table
-- one-to-one best label matches
-- adjusted Rand index
-
-`overlap_significance(...)` 用全局 `np.random.shuffle` 生成 query-label surrogate。这里同样不引入局部 RNG 或 seed 字段。
-
-## 稳态窗口敏感性
-
-`analysis/temporal.py` 提供：
-
-```python
-from v1_research.analysis.temporal import run_window_analysis
-```
-
-它接收已经加载好的 `AnalysisInputs`，按 `tail_fractions` 或 `end_times` 切出响应窗口，然后复用同一个 `run_analysis(...)`。这样 DG orientation window robustness 不需要新建专用脚本，也不会复制 OSI、Louvain 或 metrics 逻辑。
-
-典型数据流：
-
-```text
-load_analysis_inputs_from_simulation(...)
--> AnalysisInputs(responses, coords, distance, orientation_angles)
--> run_window_analysis(cfg, inputs, tail_fractions=(0.25, 0.5))
--> list[summary rows]
-```
-
-这些 summary rows 可以被现有 sweep 的 `summary.*` 字段自然收集。
-
-## Run summarize CLI
-
-统一只读汇总入口位于 `workflows/summarize.py` 和 CLI：
-
-```powershell
-uv run v1-simulation summarize --run runs/train/...
-uv run v1-simulation summarize --run runs/simulate/... --output summary.json
-```
-
-它读取新 run bundle 中常见的：
-
-- `manifest.json`
-- `model/state.npz`
-- `arrays/excitatory_rates.npy`
-- `arrays/inhibitory_rates.npy`
-- `analysis/metrics.json`
-- `tables/training_log.csv`
-- `tables/training_diagnostics.csv`
-
-该命令替代旧的 `summarize_simulation_run.py`、`summarize_analysis_artifact.py` 和 `summarize_bcm_diagnostics.py` 的常用只读汇总场景。它不兼容旧 artifact 命名。
-
-## Sweep 边界
-
-DG orientation coverage、Louvain 参数、window robustness、spatial gates 等扫描都应继续使用 `workflows/sweep.py`：
-
-```yaml
-workflow: analyze
-base:
-  simulation_run: runs/simulate/example
-  analysis:
-    filter_by_osi: false
-parameters:
-  analysis.louvain.thr_prop: [0.08, 0.12, 0.16]
-  analysis.louvain.gamma: [0.7, 0.9]
-```
-
-成功的 workflow 会把短 summary 暴露给 sweep CSV，例如 `summary.n_ensembles`、`summary.classified_fraction`、`summary.osi_mean`。不要为了每个旧 sweep 脚本再加专用 workflow。
+图像函数不会重新运行训练，也不会重新求解 dynamics；它只消费当前 run 内存中的 diagnostic rows 和 tracked rows。
 
 ## 随机性边界
 
-本轮迁移遵守项目统一 seed 约定：
-
-- 不新增 `seed` 配置字段。
-- 不调用 `np.random.default_rng(...)`。
-- 不接收或保存 `np.random.Generator`。
-- 需要抽样时使用全局 `np.random`，由主程序在进入 workflow 前统一 `set_seed(CONFIG["seed"])`。
-
-这意味着同一个 sweep 内各 grid point 会按顺序消费全局随机状态。如果需要完全可重复的实验顺序，由调用方在 workflow 外统一设置 seed，而不是在诊断函数内部重置随机状态。
+本诊断路径不新增 seed。`sample_tracked_weights(...)` 继续使用全局 `np.random`，由外层实验入口统一控制随机性。健康报告、CSV 诊断和机制图本身都是确定性地从当前 batch rates、model、BCM state 与 config 计算出来。
