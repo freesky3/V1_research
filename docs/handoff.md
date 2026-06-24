@@ -217,3 +217,50 @@ uv run python -m compileall src tests
 - 下一步如果迁移完整训练 workflow，让自然图像 batch、solver、artifact 保存都在 `workflows/` 或 run bundle 层组装；不要把 BCM 公式写回 trainer。
 - 如果要加入 `JaxBCMLearningRule`，实现同一个 `LearningRule` 协议，并只扩展 `make_learning_rule(...)` 分支。
 - 后续 Oja/Hebbian 规则可以复用 `RateBatch.external`，但 workflow 不应该知道某个规则是否使用 external rates。
+
+# Workflows 层迁移交接
+
+本轮补齐了可运行闭环的 workflow 和 run bundle IO：
+
+- `src/v1_research/runs.py`：新增 run 目录创建、`config.yaml`、`manifest.json`、CSV rows、模型 checkpoint 保存/读取。`state.npz` 保存 layout 和 CSR component，不把 weights/mask 强制转 dense。
+- `src/v1_research/workflows/train.py`：保留原有 `apply_learning_rule(...)` 和 `solve_and_learn_batch(...)`，新增 `NaturalImageWorkflowConfig`、`TrainingWorkflowConfig`、`TrainingRun`、`run_training(...)`。完整流程是 build model -> natural image drive/cache -> solve dynamics -> learning rule -> training log -> final model bundle。
+- `src/v1_research/workflows/simulate.py`：新增 `SimulationWorkflowConfig`、`SimulationRun`、`run_grating_simulation(...)`。支持从 checkpoint 读取模型，或从 config + empirical data 构建 fresh model；输出 grating rates/time/orientation/trajectory arrays。
+- `src/v1_research/workflows/full.py`：新增 `FullWorkflowConfig`、`FullRun`、`run_train_then_simulate(...)`，只是顺序组合 train 和 simulate。
+- `src/v1_research/cli.py`：从 placeholder 改为 Typer app，支持 `train`、`simulate`、`full`，用 OmegaConf 读取 YAML 并应用 `-o key=value` override。
+- `docs/workflows.md`：当前 workflow/run bundle/CLI 的逻辑文档。
+
+关键约定：
+
+- Workflow 只负责调度和 IO，不写 BCM 公式、Gabor 投影公式或 Wilson-Cowan 方程。
+- 仍然不创建局部 RNG，不新增 `seed` 字段；主程序统一设置全局 seed。
+- 当前没有迁移完整 analysis workflow、Louvain/OSI、sweep、旧 diagnostics、early stop 或 Diffrax 路径。
+- `manifest.json` 只放 summary 和 key output paths，不恢复旧 `aE_all.npy`、`run_config.json` 命名。
+
+新增测试：
+
+- `tests/test_runs_io.py`：run dir / manifest / model checkpoint roundtrip。
+- `tests/test_workflows_simulate.py`：从 checkpoint 运行 grating simulation 并检查 run bundle shape。
+- `tests/test_workflows_training_bundle.py`：用临时小 `.iml` 图像跑 natural-image training bundle。
+- `tests/test_cli_workflows.py`：CLI 加载 YAML、应用 override、dispatch workflow；并覆盖 `model_checkpoint: null` 保持为 `None`。
+
+遇到的坑和解决方式：
+
+- `docs/` 被 `.gitignore` 忽略；新增 `docs/workflows.md` 和更新 `docs/handoff.md` 需要 `git add -f`。
+- `compileall` 会生成 `__pycache__`；本轮验证后已清理。
+- CLI 递归构造 dataclass 时，由于 `from __future__ import annotations`，需要用 `get_type_hints(...)` 解析真实类型；否则嵌套 config 不会被正确构造。
+- YAML 里可选路径字段写 `null` 时，一开始会被 `Path(None)` 绊倒；已在 `_coerce_value(...)` 开头保留 `None`。
+- `git status` 中 `.gitignore` 在本轮开始前已有用户/前序修改（新增 `docs/` ignore）。本次提交不要把它作为 workflow 改动一起提交，除非用户明确要求。
+
+最近一次验证：
+
+```powershell
+uv run pytest
+uv run python -m compileall src tests
+rg -n "default_rng|SeedSequence|seed\s*:|seed\s*=|np\.random\.Generator" src\v1_research tests
+```
+
+结果：
+
+- 全量 pytest：43 passed, 1 skipped。
+- compileall：通过。
+- RNG/seed 扫描：无新增局部 RNG/seed 字段输出。

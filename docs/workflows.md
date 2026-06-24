@@ -1,0 +1,139 @@
+# Workflows 层说明
+
+本文档说明当前 `v1_research.workflows` 和 `v1_research.runs` 的逻辑。Workflow 层只负责调度和 IO：组装模型、输入、solver、learning rule，写 run bundle。科学计算仍留在 `model/`、`inputs/`、`dynamics/`、`learning/` 和后续 `analysis/`。
+
+## 推荐阅读顺序
+
+1. `src/v1_research/runs.py`：run 目录、manifest、CSV、模型 checkpoint 的轻量 IO。
+2. `src/v1_research/workflows/train.py`：natural-image training workflow 和已有 batch helper。
+3. `src/v1_research/workflows/simulate.py`：drifting-grating simulation workflow。
+4. `src/v1_research/workflows/full.py`：先 train 后 simulate 的组合 workflow。
+5. `src/v1_research/cli.py`：Typer + OmegaConf 的命令入口。
+
+## Run Bundle
+
+`create_run_dir(run_root, workflow)` 创建：
+
+```text
+runs/<workflow>/<timestamp>/
+  config.yaml
+  manifest.json
+  model/
+    state.npz
+    metadata.json
+  arrays/
+  tables/
+  analysis/
+  figures/
+```
+
+`state.npz` 保存 `ModelState` 的 layout、connection mask 和 weights。mask/weights 以 CSR component 保存，不会为了 checkpoint 把大矩阵转成 dense array。`load_model_state(...)` 是当前唯一的模型 checkpoint 读取入口。
+
+`manifest.json` 只记录 workflow 类型、solver、learning rule、模型尺寸、关键输出路径和短 summary。不要把所有数组塞进 manifest，也不要恢复旧项目的 `aE_all.npy`、`run_config.json` 等兼容命名。
+
+## Training Workflow
+
+入口：
+
+```python
+from v1_research.workflows import TrainingWorkflowConfig, run_training
+
+result = run_training(TrainingWorkflowConfig(), show_progress=False)
+```
+
+局部 config 位于 `workflows/train.py`：
+
+- `NaturalImageWorkflowConfig`：自然图像目录、shape、crop、RF config、preprocess config、drive config、projection cache 路径。
+- `TrainingWorkflowConfig`：组合 `ModelConfig`、`SolverConfig`、`LearningConfig`、`BackgroundConfig`、time grid、batch size 和 epoch 数。
+
+数据流：
+
+```text
+TrainingWorkflowConfig
+-> ExperimentalData.from_path(...)
+-> build_model(cfg.model, empirical)
+-> VanHaterenImageDataset / NaturalImageSampler
+-> NaturalImagePreprocessor / L4NaturalImageProjector / NaturalImageL4Drive
+-> optional NaturalImageProjectionCache preload
+-> solve_and_learn_batch(...)
+   -> solve_rates(...)
+   -> RateBatch
+   -> LearningRule.initialize(...) or step(...)
+-> tables/training_log.csv
+-> model/state.npz
+-> manifest.json
+```
+
+`solve_and_learn_batch(...)` 仍然是一个薄 helper，只依赖 `LearningRule` 协议，不包含 BCM 公式。首次 batch 初始化 learning state，`updated=False`；后续 batch 调用 rule step，`updated=True`。
+
+重要 shape：
+
+- natural-image drive 返回 `(n_input, n_batch)`。
+- solver 输出 `RateResult.exc=(n_batch, n_exc)`、`RateResult.inh=(n_batch, n_inh)`。
+- learning 使用 `RateBatch.external=(n_batch, n_input)`。
+
+## Simulation Workflow
+
+入口：
+
+```python
+from v1_research.workflows import SimulationWorkflowConfig, run_grating_simulation
+
+result = run_grating_simulation(SimulationWorkflowConfig(model_checkpoint="runs/train/.../model"))
+```
+
+`SimulationWorkflowConfig` 位于 `workflows/simulate.py`，组合 `ModelConfig`、`SolverConfig`、`DriftingGratingConfig`、`BackgroundConfig`、time grid 和可选 `model_checkpoint`。
+
+数据流：
+
+```text
+SimulationWorkflowConfig
+-> load_model_state(model_checkpoint) or build_model(...)
+-> DriftingGratingInput(cfg.grating, model.layout)
+-> stimulus.make_batched_drive_func(orientation_angles)
+-> solve_rates(...)
+-> arrays/excitatory_rates.npy
+-> arrays/inhibitory_rates.npy
+-> arrays/time.npy
+-> arrays/orientation_angles.npy
+-> optional trajectory arrays
+-> model/state.npz
+-> manifest.json
+```
+
+重要 shape：
+
+- orientation batch size 等于 `grating.n_orientations`。
+- `excitatory_rates.npy` shape 为 `(n_orientations, n_exc)`。
+- `inhibitory_rates.npy` shape 为 `(n_orientations, n_inh)`。
+- 若 `SolverConfig.store_trajectory=True`，trajectory shape 为 `(n_time, n_orientations, n_exc/n_inh)`。
+
+## Full Workflow
+
+入口：
+
+```python
+from v1_research.workflows import FullWorkflowConfig, run_train_then_simulate
+
+result = run_train_then_simulate(FullWorkflowConfig())
+```
+
+`run_train_then_simulate(...)` 先运行 `run_training(...)`，再把训练输出的 `model/` checkpoint 作为 `SimulationWorkflowConfig.model_checkpoint` 传给 `run_grating_simulation(...)`。它只是组合两个 workflow，不新增训练或仿真的科学逻辑。
+
+## CLI
+
+入口在 `src/v1_research/cli.py`：
+
+```powershell
+uv run v1-simulation train --config configs/train_bcm.yaml -o batch_size=4
+uv run v1-simulation simulate --config configs/simulate_grating.yaml -o solver.backend=scipy
+uv run v1-simulation full --config configs/full.yaml --no-progress
+```
+
+CLI 使用 `OmegaConf.load(...)` 和 `OmegaConf.from_dotlist(...)` 做 YAML + `key=value` override，然后递归构造对应 workflow dataclass。这里没有全局 schema，也不接管 random seed；主程序仍应在进入 workflow 前统一设置全局 seed。
+
+## 随机性和边界
+
+Workflow 层不创建局部 RNG，也没有 `seed` 字段。随机性来自 model/input/background 中已有的全局 `np.random` 调用，由主程序统一设置 seed。
+
+当前没有实现完整 analysis workflow、Louvain/OSI、sweep、旧 diagnostics、early stop 或 Diffrax 路径。后续迁移这些能力时，应把纯计算放到 `analysis/` 或对应科学模块，workflow 只负责读取 run bundle、调用计算、保存结果。
