@@ -5,6 +5,7 @@ import pytest
 
 from v1_research.analysis.clusters import cluster_members, labels_array, relabel_consecutive
 from v1_research.analysis.communities import (
+    _drop_weak_or_small_clusters,
     agreement_matrix,
     cosine_similarity_matrix,
     pearson_correlation_matrix,
@@ -78,3 +79,27 @@ def test_labels_and_spatial_metrics_use_nonzero_communities() -> None:
 
 def test_select_center_indices_returns_middle_square() -> None:
     np.testing.assert_array_equal(select_center_indices(4, side_fraction=0.5), np.array([5, 6, 9, 10]))
+
+
+def test_louvain_cleanup_reports_weak_degree_and_small_cluster_counts() -> None:
+    labels = np.array([1.0, 1.0, 2.0, 2.0, 3.0])
+    graph_binary = np.array(
+        [
+            [False, True, False, False, False],
+            [True, False, False, False, False],
+            [False, False, False, False, False],
+            [False, False, False, False, False],
+            [False, False, False, False, False],
+        ]
+    )
+
+    cleaned, diagnostics = _drop_weak_or_small_clusters(
+        labels,
+        graph_binary,
+        min_module_degree=1.0,
+        min_cluster_size=2,
+    )
+
+    np.testing.assert_array_equal(np.nan_to_num(cleaned, nan=0.0), np.array([1.0, 1.0, 0.0, 0.0, 0.0]))
+    assert diagnostics["weak_module_degree_removed"] == 2
+    assert diagnostics["small_cluster_removed"] == 1

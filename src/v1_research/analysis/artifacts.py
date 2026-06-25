@@ -8,7 +8,7 @@ import numpy as np
 
 from v1_research.analysis.metrics import write_analysis_metrics
 from v1_research.analysis.pipeline import AnalysisResult
-from v1_research.runs import write_json
+from v1_research.runs import write_csv_rows, write_json
 
 
 def write_analysis_result(result: AnalysisResult, output_dir: str | Path, *, tables_dir: str | Path | None = None) -> dict[str, Path]:
@@ -57,3 +57,26 @@ def write_analysis_result(result: AnalysisResult, output_dir: str | Path, *, tab
         if table_dir != analysis_dir:
             paths["analysis_metrics"] = write_json(analysis_dir / "metrics.json", summary)
     return paths
+
+
+def write_analysis_inspection(
+    *,
+    output_dir: str | Path,
+    tables_dir: str | Path,
+    selection_rows: list[dict[str, object]],
+    selection_summary: dict[str, object],
+    graph_diagnostics: dict[str, object],
+    unclassified_diagnostics: dict[str, object],
+) -> dict[str, Path]:
+    """Writes JSON and CSV diagnostics for analysis inspection."""
+
+    analysis_dir = Path(output_dir)
+    table_dir = Path(tables_dir)
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    table_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "selection_funnel": write_json(analysis_dir / "selection_funnel.json", selection_summary),
+        "graph_diagnostics": write_json(analysis_dir / "graph_diagnostics.json", graph_diagnostics),
+        "unclassified_diagnostics": write_json(analysis_dir / "unclassified_diagnostics.json", unclassified_diagnostics),
+        "selection_funnel_table": write_csv_rows(table_dir / "selection_funnel.csv", selection_rows),
+    }

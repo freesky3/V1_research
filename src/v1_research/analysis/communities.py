@@ -107,7 +107,7 @@ def identify_communities(activity_trace: ArrayLike, cfg: LouvainConfig) -> Commu
         ),
         dtype=float,
     )
-    labels = _drop_weak_or_small_clusters(
+    labels, cleanup_diagnostics = _drop_weak_or_small_clusters(
         consensus,
         graph > 0.0,
         min_module_degree=float(cfg.min_module_degree),
@@ -129,6 +129,7 @@ def identify_communities(activity_trace: ArrayLike, cfg: LouvainConfig) -> Commu
             "similarity_kind": cfg.similarity_kind,
             "n_ensembles": int(np.unique(final_labels[final_labels != 0]).size),
             "classified_neurons": int(np.sum(final_labels != 0)),
+            **cleanup_diagnostics,
         },
     )
 
@@ -188,19 +189,31 @@ def _drop_weak_or_small_clusters(
     *,
     min_module_degree: float,
     min_cluster_size: int,
-) -> NDArray[np.float64]:
+) -> tuple[NDArray[np.float64], dict[str, int]]:
     cleaned = np.asarray(labels, dtype=float).copy()
+    diagnostics = {"weak_module_degree_removed": 0, "small_cluster_removed": 0}
+
+    for c_id in np.unique(cleaned[np.isfinite(cleaned)]):
+        members = np.flatnonzero(cleaned == c_id)
+        if 0 < members.size < int(min_cluster_size):
+            diagnostics["small_cluster_removed"] += int(members.size)
+            cleaned[members] = np.nan
+
     for c_id in np.unique(cleaned[np.isfinite(cleaned)]):
         members = np.flatnonzero(cleaned == c_id)
         if members.size == 0:
             continue
         degree = graph_binary[np.ix_(members, members)].sum(axis=1)
-        cleaned[members[degree < float(min_module_degree)]] = np.nan
+        weak = members[degree < float(min_module_degree)]
+        diagnostics["weak_module_degree_removed"] += int(weak.size)
+        cleaned[weak] = np.nan
 
     for c_id in np.unique(cleaned[np.isfinite(cleaned)]):
-        if np.sum(cleaned == c_id) < int(min_cluster_size):
-            cleaned[cleaned == c_id] = np.nan
-    return cleaned
+        members = np.flatnonzero(cleaned == c_id)
+        if 0 < members.size < int(min_cluster_size):
+            diagnostics["small_cluster_removed"] += int(members.size)
+            cleaned[members] = np.nan
+    return cleaned, diagnostics
 
 
 def _validate_louvain_config(cfg: LouvainConfig) -> None:

@@ -11,7 +11,12 @@ from v1_research.analysis.communities import LouvainConfig
 from v1_research.analysis.pipeline import AnalysisConfig
 from v1_research.model import ModelState, PopulationLayout, SheetGeometry
 from v1_research.runs import create_run_dir, save_model_state, write_manifest
-from v1_research.workflows.analyze import AnalysisWorkflowConfig, run_analysis_workflow
+from v1_research.workflows.analyze import (
+    AnalysisInspectionConfig,
+    AnalysisRobustnessConfig,
+    AnalysisWorkflowConfig,
+    run_analysis_workflow,
+)
 
 
 def _four_exc_model() -> ModelState:
@@ -72,9 +77,19 @@ def test_analysis_workflow_reads_simulation_bundle_and_writes_outputs(tmp_path) 
     assert (run_dir / "analysis" / "preferred_orientation.npy").is_file()
     assert (run_dir / "analysis" / "community_labels.npy").is_file()
     assert (run_dir / "analysis" / "metrics.json").is_file()
+    assert (run_dir / "analysis" / "selection_funnel.json").is_file()
+    assert (run_dir / "analysis" / "graph_diagnostics.json").is_file()
+    assert (run_dir / "analysis" / "unclassified_diagnostics.json").is_file()
     assert (run_dir / "tables" / "ensemble_metrics.csv").is_file()
+    assert (run_dir / "tables" / "selection_funnel.csv").is_file()
+    assert (run_dir / "figures" / "analysis_summary.png").is_file()
+    assert (run_dir / "figures" / "analysis_cortical_map.png").is_file()
+    assert (run_dir / "figures" / "analysis_similarity.png").is_file()
+    assert (run_dir / "figures" / "analysis_tuning.png").is_file()
+    assert (run_dir / "figures" / "analysis_failure_diagnosis.png").is_file()
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["analysis"]["status"] == "ok"
+    assert "selection_funnel" in manifest["analysis_outputs"]
 
 
 def test_analysis_workflow_falls_back_to_mean_rates_without_trajectory(tmp_path) -> None:
@@ -92,6 +107,51 @@ def test_analysis_workflow_falls_back_to_mean_rates_without_trajectory(tmp_path)
     )
 
     assert result.result.steady_state_responses.shape == (4, 4, 1)
+
+
+def test_analysis_workflow_can_disable_inspection_plots(tmp_path) -> None:
+    run_dir = _simulation_bundle(tmp_path)
+    result = run_analysis_workflow(
+        AnalysisWorkflowConfig(
+            simulation_run=run_dir,
+            inspection=AnalysisInspectionConfig(save_plots=False),
+            analysis=AnalysisConfig(
+                osi_threshold=0.0,
+                filter_by_osi=False,
+                louvain=LouvainConfig(num_runs=1, consensus_reps=1, min_cluster_size=1),
+            ),
+        )
+    )
+
+    assert "analysis_summary_figure" not in result.output_paths
+    assert not (run_dir / "figures" / "analysis_summary.png").exists()
+
+
+def test_analysis_workflow_writes_optional_robustness_outputs(tmp_path) -> None:
+    run_dir = _simulation_bundle(tmp_path)
+    result = run_analysis_workflow(
+        AnalysisWorkflowConfig(
+            simulation_run=run_dir,
+            inspection=AnalysisInspectionConfig(
+                robustness=AnalysisRobustnessConfig(
+                    enabled=True,
+                    tail_fractions=(0.5,),
+                    louvain_parameter_grid={"louvain.gamma": (0.5,)},
+                )
+            ),
+            analysis=AnalysisConfig(
+                osi_threshold=0.0,
+                filter_by_osi=False,
+                louvain=LouvainConfig(num_runs=1, consensus_reps=1, min_cluster_size=1),
+            ),
+        )
+    )
+
+    assert (run_dir / "tables" / "robustness_windows.csv").is_file()
+    assert (run_dir / "tables" / "robustness_louvain.csv").is_file()
+    assert (run_dir / "analysis" / "robustness_summary.json").is_file()
+    assert (run_dir / "figures" / "analysis_robustness.png").is_file()
+    assert "robustness_summary" in result.output_paths
 
 
 def test_cli_analyze_loads_config_and_dispatches(tmp_path, monkeypatch) -> None:
@@ -131,3 +191,45 @@ def test_cli_analyze_loads_config_and_dispatches(tmp_path, monkeypatch) -> None:
     assert captured["simulation_run"] == tmp_path / "runs" / "simulate" / "demo"
     assert captured["osi_threshold"] == 0.3
     assert captured["num_runs"] == 2
+
+
+def test_cli_analyze_loads_inspection_config(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "analyze.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                f"simulation_run: {tmp_path / 'runs' / 'simulate' / 'demo'}",
+                "inspection:",
+                "  enabled: true",
+                "  save_plots: false",
+                "  robustness:",
+                "    enabled: true",
+                "    tail_fractions: [0.5]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_run_analysis_workflow(cfg):
+        captured["enabled"] = cfg.inspection.enabled
+        captured["save_plots"] = cfg.inspection.save_plots
+        captured["robustness_enabled"] = cfg.inspection.robustness.enabled
+        captured["tail_fractions"] = tuple(cfg.inspection.robustness.tail_fractions)
+
+        class Result:
+            run_dir = tmp_path / "runs" / "simulate" / "demo"
+
+        return Result()
+
+    monkeypatch.setattr(cli, "run_analysis_workflow", fake_run_analysis_workflow)
+
+    result = CliRunner().invoke(cli.app, ["analyze", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "enabled": True,
+        "save_plots": False,
+        "robustness_enabled": True,
+        "tail_fractions": (0.5,),
+    }

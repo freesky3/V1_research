@@ -1,6 +1,16 @@
 simulation_run: runs/simulate/example
 output_run_root: null
 save_inputs: true
+inspection:
+  enabled: true
+  save_plots: true
+  save_tables: true
+  robustness:
+    enabled: false
+    tail_fractions: [0.25, 0.5, 0.75, 1.0]
+    end_times: []
+    louvain_parameter_grid: {}
+    overlap_surrogates: 0
 analysis:
   osi_threshold: 0.0
   filter_by_osi: false

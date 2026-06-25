@@ -176,3 +176,26 @@ runs/simulate/<timestamp>/
 - 未迁移：`frames_sorted.py`、plotting-heavy diagnostics、DG/OU all-cell 专用脚本。
 
 这些未迁移部分如果以后需要，应先明确科学问题，再把纯计算拆到 `analysis/`，把调度放到 `workflows/` 或 sweep 模块中。
+
+## Analyze inspection outputs
+
+The `analyze` workflow now has an `inspection` config block. By default it writes lightweight single-run diagnostics in addition to compact arrays:
+
+- `analysis/selection_funnel.json`
+- `analysis/graph_diagnostics.json`
+- `analysis/unclassified_diagnostics.json`
+- `tables/selection_funnel.csv`
+- `figures/analysis_summary.png`
+- `figures/analysis_cortical_map.png`
+- `figures/analysis_similarity.png`
+- `figures/analysis_tuning.png`
+- `figures/analysis_failure_diagnosis.png`
+
+Set `inspection.save_plots=false` to keep JSON/CSV diagnostics without PNG figures. Set `inspection.enabled=false` to keep the previous compact-output behavior.
+
+Optional robustness diagnostics run only when `inspection.robustness.enabled=true`. They may write:
+
+- `tables/robustness_windows.csv`
+- `tables/robustness_louvain.csv`
+- `analysis/robustness_summary.json`
+- `figures/analysis_robustness.png`
