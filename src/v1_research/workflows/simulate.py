@@ -24,6 +24,7 @@ from v1_research.runs import (
     write_json,
     write_manifest,
 )
+from v1_research.seed import set_global_seed
 from v1_research.workflows.simulation_health import (
     SimulationHealthConfig,
     compute_simulation_health,
@@ -70,6 +71,7 @@ class TrialSchedule:
 class SimulationWorkflowConfig:
     """Top-level configuration for a grating simulation run."""
 
+    seed: int | None = None
     run_root: str | Path = Path("runs")
     empirical_data_path: str | Path = Path("data/sample_data.pkl")
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -110,6 +112,7 @@ class SimulationRun:
 def run_grating_simulation(cfg: SimulationWorkflowConfig) -> SimulationRun:
     """Runs a drifting-grating batch simulation and writes a run bundle."""
 
+    set_global_seed(cfg.seed)
     run_dir = create_run_dir(cfg.run_root, "simulate")
     write_config(run_dir, cfg)
     model = _load_or_build_model(cfg)
@@ -168,6 +171,7 @@ def run_grating_simulation(cfg: SimulationWorkflowConfig) -> SimulationRun:
         run_dir,
         {
             "workflow": "simulate",
+            "seed": cfg.seed,
             "solver": cfg.solver.backend,
             "dtype": cfg.solver.jax_dtype,
             "model": model_summary(model),

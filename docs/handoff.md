@@ -73,7 +73,7 @@
 5. 不能引入局部 RNG。
    - `sample_tracked_weights(...)` 使用全局 `np.random.choice`。
    - `overlap_significance(...)` 使用全局 `np.random.shuffle`。
-   - 不新增 `seed` 字段、不使用 `np.random.default_rng(...)`。
+   - 当时未新增 `seed` 字段，也不使用 `np.random.default_rng(...)`。
 
 ## 最近验证结果
 
@@ -90,7 +90,7 @@ rg "v1_simulation|RootConfig|NetworkState|run_config|aE_all|frames_sorted" src t
 
 - `pytest`：`71 passed, 1 skipped, 4 warnings`
 - `compileall`：通过
-- RNG/seed 扫描：无命中
+- 当时 RNG/seed 扫描：无命中
 - 旧兼容依赖扫描：无命中
 
 验证后已清理 `src/` 和 `tests/` 下的 `__pycache__`。
@@ -154,7 +154,7 @@ simulate 生成 8 方向、多 trial drifting-grating bundle
 2. `compileall` 会重新生成 `src/` 和 `tests/` 下的 `__pycache__`。
    - 处理：验证后只清理 `src` 和 `tests` 内确认过路径的 `__pycache__`。
 3. 用户要求主程序统一设置随机种子。
-   - 处理：trial schedule 使用全局 `np.random.permutation/uniform`，没有新增局部 RNG、`seed` 字段或 `np.random.default_rng(...)`。
+   - 处理：trial schedule 使用全局 `np.random.permutation/uniform`，当时没有新增局部 RNG、`seed` 字段或 `np.random.default_rng(...)`。
 4. 旧 `frames_sorted` 有很多 plot/diagnostic 逻辑。
    - 处理：本轮只迁移主统计量，不搬 sorted-trial trace、variance 图、single-neuron diagnostics 或 random-blocks。
 5. `.gitignore` 在本轮之前已有未提交修改，且 `.superpowers/` 是未跟踪目录。
@@ -164,3 +164,13 @@ simulate 生成 8 方向、多 trial drifting-grating bundle
 
 - 默认继续用 `jax-rk4` 作为 GPU 主性能路径；只有遇到明确 adaptive/steady-state stop 需求时再实现最小 `diffrax` backend。
 - 若继续迁移旧项目，优先考虑 DG/OU all-cell paired analysis 或 BCM 深度诊断；不要恢复 Hydra/RootConfig 兼容层。
+
+## 2026-06-26 全局 seed 控制交接
+
+本轮已新增命令级全局 seed 控制：
+
+- `src/v1_research/seed.py` 提供 `set_global_seed(...)`，设置 Python `random`、NumPy、`PYTHONHASHSEED`，并在安装 Torch 时设置 Torch/CUDA/cuDNN deterministic 开关。
+- `TrainingWorkflowConfig`、`SimulationWorkflowConfig`、`AnalysisWorkflowConfig`、`FullWorkflowConfig` 和 `SweepConfig` 都有顶层 `seed: int | None`。
+- 单独 workflow 在入口调用 `set_global_seed(cfg.seed)`；`full` 和 `sweep` 先设置根 seed，再用 `preserve_global_seed()` 防止子 workflow 或 grid point 重新设 seed，因此整次命令消耗一条连续随机流。
+- 示例 YAML 已加 `seed: null`。临时覆盖用 `-o seed=123`，没有单独的 `--seed` 选项。
+- 新增 `tests/test_seed_control.py` 覆盖 helper、config override、simulate 可复现、full 连续流和 sweep 连续流。

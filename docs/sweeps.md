@@ -161,6 +161,16 @@ base:
 
 ## 随机性边界
 
-sweep 层不创建局部 RNG，不接 `seed` 字段，也不在每个 grid point 内重设随机状态。复现边界仍然在主程序入口，由用户统一调用全局 `set_seed(CONFIG["seed"])`。
+`SweepConfig` 现在有顶层 `seed` 字段。`run_sweep(...)` 会在展开 grid 之前设置一次全局 seed，并让后续 grid point 按顺序消耗同一条随机流，不会在每个 point 内重新设 seed。复现边界仍然在命令顶层。
 
-如果同一个 sweep 内不同 grid point 需要严格可复现，调用方应在进入 `run_sweep(...)` 前设置全局 seed，并理解每个 grid point 会按顺序消耗全局随机状态。不要在 sweep 内部重新引入 `np.random.default_rng(...)` 或 per-run seed。
+如果需要通过 YAML 或 CLI 控制它，写在 sweep 顶层：
+
+```yaml
+seed: 123
+```
+
+或者：
+
+```powershell
+uv run v1-simulation sweep --config configs/sweep_simulate.yaml -o seed=123
+```

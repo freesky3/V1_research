@@ -141,7 +141,7 @@ activity_trace: (n_selected, n_features)
 
 label `0` 表示 unclassified。非零 community labels 会重新映射成连续整数。
 
-随机性仍由主程序统一控制：analysis 层没有 `seed` 字段，不创建局部 RNG，也不接收 `np.random.Generator`。BCT 在未显式传 seed 时使用 NumPy 全局随机状态，因此入口处的 `set_seed(CONFIG["seed"])` 仍是复现边界。
+随机性仍由 workflow 入口统一控制：analysis 纯计算层不创建局部 RNG，也不接收 `np.random.Generator`。`AnalysisWorkflowConfig.seed` 会在 `run_analysis_workflow(...)` 入口设置全局 seed；BCT 在未显式传 seed 时继续使用 NumPy 全局随机状态。
 
 ## Metrics 和 Artifacts
 

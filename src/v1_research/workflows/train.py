@@ -56,6 +56,7 @@ from v1_research.runs import (
     write_json,
     write_manifest,
 )
+from v1_research.seed import set_global_seed
 
 SolverCallable = Callable[..., RateResult]
 
@@ -93,6 +94,7 @@ class TrainingInspectionConfig:
 class TrainingWorkflowConfig:
     """Top-level configuration for natural-image learning runs."""
 
+    seed: int | None = None
     run_root: str | Path = Path("runs")
     empirical_data_path: str | Path = Path("data/sample_data.pkl")
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -186,6 +188,7 @@ def _solve_batch_rates(
 def run_training(cfg: TrainingWorkflowConfig, *, show_progress: bool = True) -> TrainingRun:
     """Runs natural-image learning and writes a run bundle."""
 
+    set_global_seed(cfg.seed)
     run_dir = create_run_dir(cfg.run_root, "train")
     write_config(run_dir, cfg)
     empirical = ExperimentalData.from_path(cfg.empirical_data_path)
@@ -331,6 +334,7 @@ def run_training(cfg: TrainingWorkflowConfig, *, show_progress: bool = True) -> 
         run_dir,
         {
             "workflow": "train",
+            "seed": cfg.seed,
             "solver": cfg.solver.backend,
             "learning_rule": cfg.learning.kind,
             "dtype": cfg.solver.jax_dtype,

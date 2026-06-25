@@ -20,6 +20,7 @@ from v1_research.analysis.pipeline import (
 from v1_research.analysis.robustness import run_louvain_parameter_grid, summarize_robustness
 from v1_research.analysis.temporal import run_window_analysis
 from v1_research.runs import relative_output_path, write_config, write_csv_rows, write_json, write_manifest
+from v1_research.seed import set_global_seed
 from v1_research.workflows.analysis_figures import save_analysis_figures, save_analysis_robustness_figure
 
 
@@ -49,6 +50,7 @@ class AnalysisWorkflowConfig:
     """Top-level configuration for analyzing a grating simulation run."""
 
     simulation_run: str | Path
+    seed: int | None = None
     output_run_root: str | Path | None = None
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     save_inputs: bool = True
@@ -68,6 +70,7 @@ class AnalysisRun:
 def run_analysis_workflow(cfg: AnalysisWorkflowConfig) -> AnalysisRun:
     """Loads a simulation bundle, runs analysis, and writes compact outputs."""
 
+    set_global_seed(cfg.seed)
     source_run = Path(cfg.simulation_run)
     output_dir = _analysis_output_dir(cfg)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -155,6 +158,7 @@ def run_analysis_workflow(cfg: AnalysisWorkflowConfig) -> AnalysisRun:
             output_dir,
             {
                 "workflow": "analyze",
+                "seed": cfg.seed,
                 "source_run": str(source_run),
                 "analysis": summary,
                 "outputs": {

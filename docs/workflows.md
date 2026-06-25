@@ -239,12 +239,12 @@ uv run v1-simulation sweep --config configs/sweep_simulate.yaml -o parameters.gr
 uv run v1-simulation summarize --run runs/simulate/...
 ```
 
-CLI 使用 `OmegaConf.load(...)` 和 `OmegaConf.from_dotlist(...)` 做 YAML + `key=value` override，然后递归构造对应 workflow dataclass。这里没有全局 schema，也不接管 random seed；主程序仍应在进入 workflow 前统一设置全局 seed。
+CLI 使用 `OmegaConf.load(...)` 和 `OmegaConf.from_dotlist(...)` 做 YAML + `key=value` override，然后递归构造对应 workflow dataclass。`seed` 也是普通顶层字段，可以写进 YAML，也可以用 `-o seed=123` 覆盖；这里没有单独的 `--seed` 选项。workflow 入口会在进入主体逻辑前统一设置全局 seed。
 
 `summarize` 是只读入口，读取新 run bundle 的 manifest、model checkpoint、常见 arrays、analysis metrics、`analysis/training_health.json`、`analysis/simulation_health.json` 和训练表，写出 compact `summary.json` 或用户指定输出路径。不兼容旧 artifact 名。
 
 ## 随机性和边界
 
-Workflow 层不创建局部 RNG，也没有 `seed` 字段。随机性来自 model/input/background 中已有的全局 `np.random` 调用，由主程序统一设置 seed。
+Workflow 层仍不创建局部 RNG；随机性来自 model/input/background 中已有的全局 `np.random` 调用。单独 workflow 会在自己的入口设置一次 seed；`full` 和 `sweep` 会用 `preserve_global_seed()` 保持整次命令的连续随机流，避免子流程或 grid point 之间重置。
 
 当前没有恢复 old scripts 的 plotting-only diagnostics、early stop 或 Diffrax 验证脚本。后续迁移这些能力时，应把纯计算放到对应科学模块，workflow 只负责读取 run bundle、调用计算、保存结果。

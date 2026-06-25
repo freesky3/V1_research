@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import product
 from pathlib import Path
 from typing import Any, Literal
@@ -19,6 +19,7 @@ from v1_research.runs import (
     write_json,
     write_manifest,
 )
+from v1_research.seed import preserve_global_seed, set_global_seed
 from v1_research.workflows.analyze import AnalysisWorkflowConfig, run_analysis_workflow
 from v1_research.workflows.full import FullWorkflowConfig, run_train_then_simulate
 from v1_research.workflows.simulate import SimulationWorkflowConfig, run_grating_simulation
@@ -32,6 +33,7 @@ class SweepConfig:
     """Configuration for an explicit grid sweep over one workflow."""
 
     workflow: WorkflowName
+    seed: int | None = None
     base: dict[str, Any] = field(default_factory=dict)
     parameters: dict[str, list[Any]] = field(default_factory=dict)
     run_root: str | Path = Path("runs")
@@ -54,11 +56,13 @@ class SweepRun:
 def run_sweep(cfg: SweepConfig, *, show_progress: bool = True) -> SweepRun:
     """Expands a grid, runs each workflow config, and writes sweep tables."""
 
+    set_global_seed(cfg.seed)
     run_dir = create_run_dir(cfg.run_root, "sweep")
     write_config(run_dir, cfg)
     rows: list[dict[str, Any]] = []
-    for index, point in enumerate(expand_grid(cfg.parameters), start=1):
-        rows.append(_run_one(index, cfg, point, show_progress=show_progress))
+    with preserve_global_seed():
+        for index, point in enumerate(expand_grid(cfg.parameters), start=1):
+            rows.append(_run_one(index, cfg, point, show_progress=show_progress))
 
     rows = _normalize_rows(rows)
     csv_path = write_csv_rows(run_dir / "tables" / "runs.csv", rows)
@@ -72,6 +76,7 @@ def run_sweep(cfg: SweepConfig, *, show_progress: bool = True) -> SweepRun:
         run_dir,
         {
             "workflow": "sweep",
+            "seed": cfg.seed,
             "target_workflow": cfg.workflow,
             "outputs": {
                 "runs": relative_output_path(csv_path, run_dir),
@@ -97,6 +102,7 @@ def _run_one(index: int, cfg: SweepConfig, point: dict[str, Any], *, show_progre
     row: dict[str, Any] = {"index": index, **point, "workflow": cfg.workflow}
     try:
         workflow_cfg = _workflow_config(cfg.workflow, _merge_point(cfg.base, point))
+        workflow_cfg = _with_seed(workflow_cfg, cfg.seed)
         result = _dispatch(cfg.workflow, workflow_cfg, show_progress=show_progress)
     except Exception as exc:  # noqa: BLE001 - sweep records failures and continues by design.
         row.update({"status": "error", "run_dir": "", "error": str(exc)})
@@ -139,6 +145,12 @@ def _workflow_config(workflow: WorkflowName, payload: dict[str, Any]) -> Any:
         "full": FullWorkflowConfig,
     }[workflow]
     return dataclass_from_mapping(cls, payload)
+
+
+def _with_seed(cfg: Any, seed: int | None) -> Any:
+    if seed is None or not hasattr(cfg, "seed"):
+        return cfg
+    return replace(cfg, seed=seed)
 
 
 def _simulate_sweep_payload(payload: dict[str, Any]) -> dict[str, Any]:

@@ -1,4 +1,5 @@
 simulation_run: runs/simulate/example
+seed: null
 output_run_root: null
 save_inputs: true
 inspection:

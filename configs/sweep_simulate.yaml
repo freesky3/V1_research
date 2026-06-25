@@ -1,4 +1,5 @@
 workflow: simulate
+seed: null
 run_root: runs
 base:
   run_root: runs

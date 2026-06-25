@@ -1,3 +1,4 @@
+seed: null
 train:
   run_root: runs
   empirical_data_path: data/sample_data.pkl
