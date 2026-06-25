@@ -33,6 +33,7 @@ def summarize_run(run_dir: str | Path) -> dict[str, Any]:
     _add_rate_summary(summary, root / "arrays" / "excitatory_rates.npy", prefix="rates.exc")
     _add_rate_summary(summary, root / "arrays" / "inhibitory_rates.npy", prefix="rates.inh")
     _add_analysis_summary(summary, root / "analysis" / "metrics.json")
+    _add_analysis_summary(summary, root / "analysis" / "direction_tuning.json")
     _add_simulation_health_summary(summary, root / "analysis" / "simulation_health.json")
     _add_training_health_summary(summary, root / "analysis" / "training_health.json")
     _add_table_summary(summary, root / "tables" / "training_log.csv", prefix="training_log")

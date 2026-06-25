@@ -96,13 +96,15 @@ result = run_grating_simulation(SimulationWorkflowConfig(model_checkpoint="runs/
 SimulationWorkflowConfig
 -> load_model_state(model_checkpoint) or build_model(...)
 -> DriftingGratingInput(cfg.grating, model.layout)
--> stimulus.make_batched_drive_func(orientation_angles)
+-> build_trial_schedule(stimulus.orientation_angles, cfg.trials)
+-> stimulus.make_batched_drive_func(trial_orientation_angles, phase_offsets)
 -> solve_rates(...)
 -> optional compute_simulation_health(...) from full trajectory
 -> arrays/excitatory_rates.npy
 -> arrays/inhibitory_rates.npy
 -> arrays/time.npy
 -> arrays/orientation_angles.npy
+-> arrays/trial_direction_indices.npy / trial_orientation_angles.npy / trial_phase_offsets.npy
 -> optional trajectory arrays
 -> optional analysis/simulation_health.json
 -> optional figures/simulate_overview.png / simulate_orientation_heatmaps.png / simulate_traces.png
@@ -112,10 +114,11 @@ SimulationWorkflowConfig
 
 重要 shape：
 
-- orientation batch size 等于 `grating.n_orientations`。
-- `excitatory_rates.npy` shape 为 `(n_orientations, n_exc)`。
-- `inhibitory_rates.npy` shape 为 `(n_orientations, n_inh)`。
-- 若 `SolverConfig.store_trajectory=True`，trajectory shape 为 `(n_time, n_orientations, n_exc/n_inh)`。
+- trial batch size 等于 `grating.n_orientations * trials.repeats_per_direction`。
+- `orientation_angles.npy` 保存唯一方向；`trial_direction_indices.npy` 保存每个 trial 属于哪个方向。
+- `excitatory_rates.npy` shape 为 `(n_trials, n_exc)`。
+- `inhibitory_rates.npy` shape 为 `(n_trials, n_inh)`。
+- 若 `SolverConfig.store_trajectory=True`，trajectory shape 为 `(n_time, n_trials, n_exc/n_inh)`。
 - `simulation_health.json` 直接从 trajectory 计算 activity、silent fraction、top1/top5 concentration、near-rate-cap、front/tail drift、tail variance、step-to-step change，以及 stimulus/background 输入分布。OSI、community 和 ensemble metrics 仍由 `analyze` workflow 负责。
 
 ## Full Workflow
@@ -177,7 +180,7 @@ SweepConfig
 
 sweep 失败边界很简单：单个 grid point 报错时，在 `tables/runs.csv` 记录 `status=error` 和 `error`，然后继续下一个点。成功行记录目标 workflow 的 `run_dir` 和扁平化的 `summary.*` 字段。`simulate` sweep 有一层专门的轻量默认：如果 base 没有显式写 `inspection`，会关闭 simulation inspection 和 plot，并在没有显式要求完整诊断时设置 `solver.store_trajectory=false`。需要完整仿真健康报告时，在 sweep base 或参数网格中显式设置 `inspection.enabled=true` 和 `solver.store_trajectory=true`。
 
-`analyze` workflow 会把 metrics summary 中的标量也放进 `summary`，所以 sweep 可以直接记录 `summary.n_ensembles`、`summary.classified_fraction`、`summary.osi_mean` 等字段，不需要专用分析 sweep 脚本。
+`analyze` workflow 会把 metrics summary 中的标量也放进 `summary`，所以 sweep 可以直接记录 `summary.n_ensembles`、`summary.classified_fraction`、`summary.osi_mean` 等字段，不需要专用分析 sweep 脚本。若 sweep 中不想每个分析点都生成 PNG，可在 `base.inspection.save_plots=false`；若只需要原始 compact analysis 产物，可设 `base.inspection.enabled=false`。
 
 ## Analysis Workflow
 
@@ -189,7 +192,7 @@ from v1_research.workflows import AnalysisWorkflowConfig, run_analysis_workflow
 result = run_analysis_workflow(AnalysisWorkflowConfig(simulation_run="runs/simulate/..."))
 ```
 
-`AnalysisWorkflowConfig` 位于 `workflows/analyze.py`，组合 simulation run 路径、可选 `output_run_root`、`AnalysisConfig` 和 `save_inputs`。底层 OSI、Louvain、spatial/community metrics 都在 `analysis/` 模块内，workflow 只负责读取 bundle、调用计算、写结果。
+`AnalysisWorkflowConfig` 位于 `workflows/analyze.py`，组合 simulation run 路径、可选 `output_run_root`、`AnalysisConfig`、`save_inputs` 和 `AnalysisInspectionConfig`。底层 OSI、Louvain、spatial/community metrics 以及 selection/graph/unclassified 诊断都在 `analysis/` 模块内，workflow 只负责读取 bundle、调用计算、写结果、生成 workflow-facing 图像，并把路径写进 manifest。
 
 数据流：
 
@@ -198,18 +201,30 @@ AnalysisWorkflowConfig
 -> load_analysis_inputs_from_simulation(...)
    -> arrays/excitatory_trajectory.npy or arrays/excitatory_rates.npy
    -> arrays/orientation_angles.npy
+   -> optional arrays/trial_direction_indices.npy
    -> model/state.npz
 -> run_analysis(...)
 -> analysis/ compact arrays and JSON
 -> tables/ensemble_metrics.csv
+-> analysis/direction_tuning.json and tables/ensemble_direction_tuning.csv
+-> if inspection.enabled:
+   -> selection_funnel(...) / graph_health_diagnostics(...) / unclassified_diagnostics(...)
+   -> optional analysis/*.json and tables/selection_funnel.csv
+   -> optional figures/analysis_*.png
+-> if inspection.robustness.enabled:
+   -> run_window_analysis(...) / run_louvain_parameter_grid(...)
+   -> optional robustness tables, summary JSON, and analysis_robustness.png
 -> manifest.json analysis summary
 ```
 
 重要 shape：
 
-- `excitatory_trajectory.npy` shape 为 `(n_time, n_orientations, n_exc)`，analysis 内部转成 `(n_exc, n_orientations, n_time)`。
-- 若没有 trajectory，则用 `excitatory_rates.npy` 的 `(n_orientations, n_exc)` 作为单时间点响应，内部 shape 为 `(n_exc, n_orientations, 1)`。
+- 新格式 trial run 中，`excitatory_trajectory.npy` shape 为 `(n_time, n_trials, n_exc)`；analysis 会保留 trial-resolved trace 给 Louvain，同时按 `trial_direction_indices.npy` 聚合成 `(n_exc, n_orientations, n_time)` 给 OSI 和 direction tuning。
+- 若没有 trajectory，则用 `excitatory_rates.npy` 的 `(n_trials, n_exc)` 作为单时间点响应；有 trial metadata 时仍会先按方向平均。
+- 没有 trial metadata 的旧式新项目 run 仍按 `(n_orientations, n_exc)` 或 `(n_time, n_orientations, n_exc)` 读取。
 - analysis 当前只分析 excitatory L2/3 cells，坐标来自 `model.layout.l23.coords[layout.exc_idx]`。
+
+`inspection.enabled=True` 是默认值。它会额外写 selection funnel、graph health、unclassified dropout 原因和五张 `analysis_*.png` 图。`inspection.save_tables` 和 `inspection.save_plots` 分别控制 JSON/CSV 与 PNG。可选 robustness 只有在 `inspection.robustness.enabled=True` 时复跑分析；窗口复跑复用已加载的 `AnalysisInputs`，Louvain 参数复跑只接受 `louvain.*` grid。
 
 ## CLI
 

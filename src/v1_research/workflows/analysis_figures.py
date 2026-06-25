@@ -40,6 +40,9 @@ def save_analysis_figures(
     _save_cortical_map(paths["analysis_cortical_map_figure"], result, plt)
     _save_similarity(paths["analysis_similarity_figure"], result, plt)
     _save_tuning(paths["analysis_tuning_figure"], result, orientation_angles, plt)
+    if "direction_tuning_rows" in result.diagnostics:
+        paths["ensemble_direction_tuning_figure"] = figure_dir / "ensemble_direction_tuning.png"
+        _save_ensemble_direction_tuning(paths["ensemble_direction_tuning_figure"], result, orientation_angles, plt)
     _save_failure(paths["analysis_failure_diagnosis_figure"], selection_rows, graph_diagnostics, unclassified_diagnostics, plt)
     return paths
 
@@ -135,6 +138,37 @@ def _save_tuning(path: Path, result: AnalysisResult, orientation_angles: ArrayLi
         ax.set_ylabel("Mean response")
         ax.set_title("Ensemble tuning")
         ax.legend(loc="best", fontsize="small")
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def _save_ensemble_direction_tuning(path: Path, result: AnalysisResult, orientation_angles: ArrayLike, plt) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(10.0, 4.0), dpi=140)
+    rows = list(result.diagnostics.get("direction_tuning_rows", []))
+    angles = np.asarray(orientation_angles, dtype=float)
+    if not rows or angles.size == 0:
+        _no_data(axes[0], "No ensemble direction tuning")
+        _no_data(axes[1], "No direction coverage")
+    else:
+        for row in rows:
+            values = _row_direction_values(row, angles)
+            axes[0].plot(np.degrees(angles), values, marker="o", label=f"ensemble {int(row['ensemble_id'])}")
+        axes[0].set_xlabel("Direction (deg)")
+        axes[0].set_ylabel("Mean response")
+        axes[0].set_title("Ensemble direction tuning")
+        axes[0].legend(loc="best", fontsize="small")
+
+        counts = np.zeros(angles.size, dtype=int)
+        for row in rows:
+            if bool(row.get("direction_selective")):
+                index = int(row.get("preferred_direction_index", -1))
+                if 0 <= index < counts.size:
+                    counts[index] += 1
+        axes[1].bar(np.degrees(angles), counts, width=360.0 / max(angles.size, 1) * 0.8, color="#4C78A8")
+        axes[1].set_xlabel("Preferred direction (deg)")
+        axes[1].set_ylabel("Selective ensembles")
+        axes[1].set_title("Direction coverage")
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
@@ -254,6 +288,22 @@ def _no_data(ax, message: str) -> None:
     ax.text(0.5, 0.5, message, ha="center", va="center", transform=ax.transAxes)
     ax.set_xticks([])
     ax.set_yticks([])
+
+
+def _row_direction_values(row: dict[str, object], angles: np.ndarray) -> np.ndarray:
+    values = []
+    for angle in angles:
+        label = _degree_label(float(angle))
+        values.append(_maybe_float(row.get(f"mean_rate_{label}deg")) or 0.0)
+    return np.asarray(values, dtype=float)
+
+
+def _degree_label(angle: float) -> str:
+    degrees = float(np.degrees(float(angle)) % 360.0)
+    rounded = round(degrees)
+    if abs(degrees - rounded) < 1.0e-9:
+        return str(int(rounded))
+    return f"{degrees:.3g}"
 
 
 def _maybe_float(value: Any) -> float | None:

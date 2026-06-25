@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import fields
 
 import numpy as np
 from scipy import sparse
@@ -9,7 +10,13 @@ from v1_research.dynamics import SolverConfig
 from v1_research.inputs.grating import DriftingGratingConfig
 from v1_research.model import ModelState, PopulationLayout, SheetGeometry
 from v1_research.runs import save_model_state
-from v1_research.workflows.simulate import SimulationWorkflowConfig, run_grating_simulation
+
+from v1_research.workflows.simulate import (
+    SimulationWorkflowConfig,
+    TrialScheduleConfig,
+    build_trial_schedule,
+    run_grating_simulation,
+)
 
 
 def _one_cell_model() -> ModelState:
@@ -31,19 +38,23 @@ def test_grating_simulation_writes_run_bundle_from_checkpoint(tmp_path) -> None:
         model_checkpoint=checkpoint,
         solver=SolverConfig(backend="scipy", scipy_method="RK4", store_trajectory=True),
         grating=DriftingGratingConfig(n_orientations=3, visual_gain=1.0, baseline_rate=0.1),
+        trials=TrialScheduleConfig(repeats_per_direction=2, shuffle=False, random_phase=False),
         time=np.array([0.0, 0.01, 0.02], dtype=float),
     )
 
     result = run_grating_simulation(cfg)
 
     assert result.run_dir.parent == tmp_path / "runs" / "simulate"
-    assert result.exc_rates.shape == (3, 1)
+    assert result.exc_rates.shape == (6, 1)
     assert (result.run_dir / "config.yaml").is_file()
     assert (result.run_dir / "model" / "state.npz").is_file()
     np.testing.assert_allclose(np.load(result.array_paths["time"]), cfg.time)
     np.testing.assert_allclose(np.load(result.array_paths["orientation_angles"]), result.orientation_angles)
-    assert np.load(result.array_paths["excitatory_rates"]).shape == (3, 1)
-    assert np.load(result.array_paths["excitatory_trajectory"]).shape == (3, 3, 1)
+    np.testing.assert_array_equal(np.load(result.array_paths["trial_direction_indices"]), np.array([0, 0, 1, 1, 2, 2]))
+    np.testing.assert_allclose(np.load(result.array_paths["trial_orientation_angles"]), result.orientation_angles[[0, 0, 1, 1, 2, 2]])
+    np.testing.assert_allclose(np.load(result.array_paths["trial_phase_offsets"]), np.zeros(6))
+    assert np.load(result.array_paths["excitatory_rates"]).shape == (6, 1)
+    assert np.load(result.array_paths["excitatory_trajectory"]).shape == (3, 6, 1)
     assert (result.run_dir / "analysis" / "simulation_health.json").is_file()
     for name in [
         "simulate_overview.png",
@@ -57,5 +68,22 @@ def test_grating_simulation_writes_run_bundle_from_checkpoint(tmp_path) -> None:
     assert manifest["workflow"] == "simulate"
     assert manifest["solver"] == "scipy"
     assert manifest["summary"]["n_orientations"] == 3
+    assert manifest["summary"]["n_trials"] == 6
     assert manifest["outputs"]["simulation_health"] == "analysis/simulation_health.json"
     assert manifest["outputs"]["simulate_overview"] == "figures/simulate_overview.png"
+
+
+def test_trial_schedule_repeats_directions_with_global_numpy_seed() -> None:
+    cfg = TrialScheduleConfig(repeats_per_direction=3, shuffle=True, random_phase=True, phase_jitter=0.1)
+    angles = np.linspace(0.0, 2.0 * np.pi, 4, endpoint=False)
+
+    np.random.seed(17)
+    first = build_trial_schedule(angles, cfg)
+    np.random.seed(17)
+    second = build_trial_schedule(angles, cfg)
+
+    assert "seed" not in {field.name for field in fields(TrialScheduleConfig)}
+    np.testing.assert_array_equal(first.direction_indices, second.direction_indices)
+    np.testing.assert_allclose(first.phase_offsets, second.phase_offsets)
+    np.testing.assert_array_equal(np.bincount(first.direction_indices, minlength=4), np.full(4, 3))
+    assert np.all(np.abs(first.phase_offsets) <= 0.1)

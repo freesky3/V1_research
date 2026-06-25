@@ -6,6 +6,9 @@ from v1_research.workflows.simulate import (
     SimulationInspectionConfig,
     SimulationRun,
     SimulationWorkflowConfig,
+    TrialSchedule,
+    TrialScheduleConfig,
+    build_trial_schedule,
     run_grating_simulation,
 )
 from v1_research.workflows.summarize import summarize_run, write_run_summary
@@ -31,10 +34,13 @@ __all__ = [
     "SimulationWorkflowConfig",
     "SweepConfig",
     "SweepRun",
+    "TrialSchedule",
+    "TrialScheduleConfig",
     "TrainingInspectionConfig",
     "TrainingRun",
     "TrainingWorkflowConfig",
     "apply_learning_rule",
+    "build_trial_schedule",
     "expand_grid",
     "run_analysis_workflow",
     "run_grating_simulation",

@@ -104,3 +104,63 @@ rg "v1_simulation|RootConfig|NetworkState|run_config|aE_all|frames_sorted" src t
 ```text
 Migrate peripheral diagnostics into workflows
 ```
+
+## 2026-06-25 Frames-sorted 方向选择性迁移交接
+
+本轮完成的是旧 `frames_sorted` 中“ensemble 是否具有方向选择性”的主科学结果迁移。没有原样搬旧脚本和大图，而是把数据流改成：
+
+```text
+simulate 生成 8 方向、多 trial drifting-grating bundle
+-> analyze 读取 bundle 并按方向聚合 trial response
+-> Louvain 使用 trial-resolved steady traces
+-> direction_tuning 输出 ensemble 方向选择性 summary/table/figure
+```
+
+主要代码：
+
+- `src/v1_research/workflows/simulate.py`
+  - 新增 `TrialScheduleConfig`、`TrialSchedule`、`build_trial_schedule(...)`。
+  - `run_grating_simulation(...)` 的 batch 语义改为 trial。
+  - 新增保存 `trial_direction_indices.npy`、`trial_orientation_angles.npy`、`trial_phase_offsets.npy`。
+  - `simulation_health` 仍检查 trial-resolved dynamics，画图时传入 `trial_orientation_angles`。
+- `src/v1_research/analysis/pipeline.py`
+  - `AnalysisInputs` 新增可选 `trial_responses` 和 `trial_direction_indices`。
+  - `load_analysis_inputs_from_simulation(...)` 有 trial metadata 时把 trial response 聚合为 direction response。
+  - OSI/preferred direction/direction tuning 使用按方向平均后的 steady response；Louvain 优先使用 trial-resolved steady traces。
+- `src/v1_research/analysis/direction_tuning.py`
+  - 新增 `DirectionTuningConfig` 和 `summarize_direction_tuning(...)`。
+  - 只统计非零 ensemble label。
+  - modulation index 使用 `(max - min) / (max + min)`，默认阈值 `0.2`。
+- `src/v1_research/analysis/artifacts.py`、`src/v1_research/workflows/analysis_figures.py`、`src/v1_research/workflows/analyze.py`、`src/v1_research/workflows/summarize.py`
+  - 写 `analysis/direction_tuning.json`。
+  - 写 `tables/ensemble_direction_tuning.csv`。
+  - `inspection.save_plots=true` 时写 `figures/ensemble_direction_tuning.png`。
+  - direction tuning 标量进入 manifest summary 和 summarize 输出。
+
+文档：
+
+- 新增 `docs/direction_tuning.md`，作为当前正式逻辑说明。
+- 已同步更新 `docs/analysis.md`、`docs/diagnostics.md`、`docs/sweeps.md`、`docs/workflows.md`。
+
+测试：
+
+- 新增 `tests/test_analysis_direction_tuning.py`。
+- 更新 `tests/test_workflows_simulate.py`、`tests/test_workflows_analyze.py`、`tests/test_workflows_summarize.py`。
+
+遇到的坑和处理：
+
+1. Windows 下并行跑多个 pytest 命令时会抢同一个 `.pytest` basetemp，出现清理目录权限错误。
+   - 处理：最终验证顺序运行，不并行跑多个 pytest。
+2. `compileall` 会重新生成 `src/` 和 `tests/` 下的 `__pycache__`。
+   - 处理：验证后只清理 `src` 和 `tests` 内确认过路径的 `__pycache__`。
+3. 用户要求主程序统一设置随机种子。
+   - 处理：trial schedule 使用全局 `np.random.permutation/uniform`，没有新增局部 RNG、`seed` 字段或 `np.random.default_rng(...)`。
+4. 旧 `frames_sorted` 有很多 plot/diagnostic 逻辑。
+   - 处理：本轮只迁移主统计量，不搬 sorted-trial trace、variance 图、single-neuron diagnostics 或 random-blocks。
+5. `.gitignore` 在本轮之前已有未提交修改，且 `.superpowers/` 是未跟踪目录。
+   - 处理：提交时不要包含 `.gitignore` 和 `.superpowers/`，除非用户另行明确要求。
+
+后续建议：
+
+- 默认继续用 `jax-rk4` 作为 GPU 主性能路径；只有遇到明确 adaptive/steady-state stop 需求时再实现最小 `diffrax` backend。
+- 若继续迁移旧项目，优先考虑 DG/OU all-cell paired analysis 或 BCM 深度诊断；不要恢复 Hydra/RootConfig 兼容层。

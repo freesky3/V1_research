@@ -79,7 +79,7 @@ solver:
   store_trajectory: false
 ```
 
-这样扫参默认只保存均值 rate、orientation、time、model 和 manifest，避免每个 grid point 都写大 trajectory 或三张图。需要把某个 sweep 当作完整诊断批处理时，必须在 `base` 或 `parameters` 中显式打开：
+这样扫参默认只保存 trial 均值 rate、唯一方向、trial metadata、time、model 和 manifest，避免每个 grid point 都写大 trajectory 或三张图。需要把某个 sweep 当作完整诊断批处理时，必须在 `base` 或 `parameters` 中显式打开：
 
 ```yaml
 base:
@@ -125,6 +125,8 @@ runs/sweep/<timestamp>/
 workflow: analyze
 base:
   simulation_run: runs/simulate/example
+  inspection:
+    enabled: false
   analysis:
     filter_by_osi: false
 parameters:
@@ -132,7 +134,18 @@ parameters:
   analysis.louvain.gamma: [0.7, 0.9]
 ```
 
-生成的 CSV 会包含 `summary.n_ensembles`、`summary.classified_fraction`、`summary.osi_mean` 等字段，可直接替代旧的 DG spatial / orientation coverage 参数扫脚本中的主要筛选表。
+生成的 CSV 会包含 `summary.n_ensembles`、`summary.classified_fraction`、`summary.osi_mean`、`summary.direction_selective_ensembles`、`summary.covered_direction_count` 等字段，可直接替代旧的 DG spatial / orientation coverage 参数扫脚本中的主要筛选表。
+
+如果分析 sweep 需要 inspection 产物，可以显式打开：
+
+```yaml
+base:
+  inspection:
+    enabled: true
+    save_plots: false
+```
+
+这样每个分析点仍可写 `selection_funnel.json`、`graph_diagnostics.json`、`unclassified_diagnostics.json` 和 `selection_funnel.csv`，但不会生成 PNG。若还要检查稳定性，可以进一步设置 `inspection.robustness.enabled=true`，并在参数网格里扫 `inspection.robustness.louvain_parameter_grid.louvain.gamma` 之类的字段。
 
 ## 常用 YAML 入口
 

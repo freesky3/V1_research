@@ -17,6 +17,9 @@ analysis:
   random_sample_fraction: 1.0
   center_side_fraction: 1.0
   steady_state_fraction: 0.34
+  direction_tuning:
+    enabled: true
+    modulation_threshold: 0.2
   louvain:
     thr_prop: 0.12
     gamma: 0.55

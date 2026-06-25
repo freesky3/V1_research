@@ -143,6 +143,11 @@ def run_analysis_workflow(cfg: AnalysisWorkflowConfig) -> AnalysisRun:
         for key, value in metrics_summary.items():
             if isinstance(value, (int, float, str)) or value is None:
                 summary[str(key)] = value
+    direction_summary = result.diagnostics.get("direction_tuning_summary", {})
+    if isinstance(direction_summary, dict):
+        for key, value in direction_summary.items():
+            if isinstance(value, (int, float, str)) or value is None:
+                summary[str(key)] = value
     if cfg.output_run_root is None:
         _update_source_manifest(source_run, summary, paths)
     else:

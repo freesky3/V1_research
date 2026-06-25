@@ -1,6 +1,6 @@
-# 训练与仿真诊断健康报告
+# 训练、仿真与分析诊断报告
 
-本文说明当前训练与 drifting-grating 仿真阶段的诊断代码如何组织，以及 `inspection.enabled=true` 时 run bundle 会写出哪些健康报告、表格和机制图。它面向需要判断训练或单次仿真是否过于静默、过度活跃、活动过度集中，是否接近 firing-rate cap，或 BCM row-sum cap 压力过大的研究者。
+本文说明当前训练、drifting-grating 仿真和 analyze 阶段的诊断代码如何组织，以及 `inspection.enabled=true` 时 run bundle 会写出哪些健康报告、表格和机制图。它面向需要判断训练或单次仿真是否过于静默、过度活跃、活动过度集中，是否接近 firing-rate cap，BCM row-sum cap 压力是否过大，或 OSI/Louvain 分析为什么没有得到清晰 ensemble 的研究者。
 
 ## 推荐阅读顺序
 
@@ -8,9 +8,13 @@
 2. `src/v1_research/learning/diagnostics.py`：看纯诊断函数、`TrainingHealthConfig` 和 `evaluate_training_health(...)`。
 3. `src/v1_research/workflows/simulation_health.py`：看 simulation 专用的 `SimulationHealthConfig`、`compute_simulation_health(...)` 和 `save_simulation_figures(...)`。
 4. `src/v1_research/workflows/simulate.py`：看 `SimulationInspectionConfig` 如何把健康报告接入单次 grating simulation。
-5. `src/v1_research/learning/bcm.py`：看 BCM state、theta、row-sum cap 与 plastic weight 更新机制。
-6. `src/v1_research/workflows/summarize.py`：看 run bundle 如何被压缩成 sweep 友好的 summary。
-7. `docs/learning.md` 与 `docs/workflows.md`：补充理解训练规则和 CLI workflow 边界。
+5. `src/v1_research/analysis/diagnostics.py`：看 analyze 的 selection funnel、graph health 和 unclassified 原因。
+6. `src/v1_research/analysis/robustness.py`：看 analyze 的窗口与 Louvain 参数 robustness 复跑。
+7. `src/v1_research/workflows/analyze.py`：看 `AnalysisInspectionConfig` 如何接入单次 analysis workflow。
+8. `src/v1_research/workflows/analysis_figures.py`：看 analysis 结果图谱与 robustness 图如何生成。
+9. `src/v1_research/learning/bcm.py`：看 BCM state、theta、row-sum cap 与 plastic weight 更新机制。
+10. `src/v1_research/workflows/summarize.py`：看 run bundle 如何被压缩成 sweep 友好的 summary。
+11. `docs/learning.md`、`docs/analysis.md` 与 `docs/workflows.md`：补充理解训练规则、分析链路和 CLI workflow 边界。
 
 ## 入口与配置
 
@@ -186,10 +190,10 @@ run_grating_simulation(...)
 
 主要数组形状：
 
-- `RateResult.exc_trajectory`: `(n_time, n_orientations, n_exc)`。
-- `RateResult.inh_trajectory`: `(n_time, n_orientations, n_inh)`。
-- sampled stimulus trace: `(n_time, n_orientations, n_input)`。
-- `BackgroundTrace.exc`: `(n_time, n_orientations, n_exc)`，`BackgroundTrace.inh`: `(n_time, n_orientations, n_inh)`。
+- `RateResult.exc_trajectory`: `(n_time, n_trials, n_exc)`。
+- `RateResult.inh_trajectory`: `(n_time, n_trials, n_inh)`。
+- sampled stimulus trace: `(n_time, n_trials, n_input)`。
+- `BackgroundTrace.exc`: `(n_time, n_trials, n_exc)`，`BackgroundTrace.inh`: `(n_time, n_trials, n_inh)`。
 
 `compute_simulation_health(...)` 会生成 `analysis/simulation_health.json`，包含：
 
@@ -260,6 +264,33 @@ runs/simulate/<timestamp>/
 
 `workflows/summarize.py` 会读取 `analysis/simulation_health.json`，并把健康状态、计数和 `metrics` 展开为 `simulation_health.*` 字段。这样 CLI `summarize`、`summary.json` 和 sweep CSV 都可以直接看到单次仿真的健康状态。
 
+开启 `analyze.inspection.enabled=true` 后，analysis run 会额外包含：
+
+```text
+runs/simulate/<timestamp>/
+  analysis/
+    selection_funnel.json
+    graph_diagnostics.json
+    unclassified_diagnostics.json
+    direction_tuning.json
+    robustness_summary.json             # robustness.enabled=True 时
+  tables/
+    selection_funnel.csv
+    ensemble_direction_tuning.csv
+    robustness_windows.csv              # robustness.enabled=True 且有窗口复跑时
+    robustness_louvain.csv              # robustness.enabled=True 且有 Louvain grid 时
+  figures/
+    analysis_summary.png                # save_plots=True
+    analysis_cortical_map.png           # save_plots=True
+    analysis_similarity.png             # save_plots=True
+    analysis_tuning.png                 # save_plots=True
+    ensemble_direction_tuning.png       # save_plots=True
+    analysis_failure_diagnosis.png      # save_plots=True
+    analysis_robustness.png             # robustness.enabled=True 且 save_plots=True
+```
+
+如果 `output_run_root` 非空，这些文件会写到指定 analysis 输出目录；否则写回原 simulation run。`manifest.json.analysis_outputs` 会记录相对路径，方便后续脚本从 manifest 找到诊断产物。
+
 ## 机制图
 
 `inspection.save_plots=true` 时，`_save_training_figures(...)` 会基于 `training_diagnostics.csv` 的同一组 rows 生成机制图：
@@ -278,6 +309,24 @@ simulation 图像由 `save_simulation_figures(...)` 生成，也不会重新求�
 - `simulate_overview.png`：活动比例、静默比例、top1/top5 集中度、near-rate-cap 和稳定性总览。
 - `simulate_orientation_heatmaps.png`：按 orientation 和 cell 展示最终 E/I rates，快速看方向间是否有强烈不均衡。
 - `simulate_traces.png`：按 orientation 展示 E/I population mean trajectory，快速看是否稳定、漂移或震荡。
+
+analysis 图像由 `save_analysis_figures(...)` 生成，同样不会重新求解 dynamics。它消费当前 `AnalysisResult`、selection funnel、graph diagnostics 和 unclassified diagnostics：
+
+- `analysis_summary.png`：selection funnel、OSI 分布、selected mean activity 和 ensemble size 的总览。
+- `analysis_cortical_map.png`：按 L2/3 坐标显示 community label、OSI、preferred orientation 和 mean activity。
+- `analysis_similarity.png`：按 community 排序后的 similarity 和 agreement matrix。
+- `analysis_tuning.png`：每个非零 ensemble 的平均 tuning 曲线。
+- `ensemble_direction_tuning.png`：每个 ensemble 的方向 tuning 曲线和 direction-selective ensemble 覆盖的方向 bin。
+- `analysis_failure_diagnosis.png`：把 selection funnel、graph health、population dropout 和 cleanup dropout 放在一张图里，适合排查为什么没有清晰 ensemble。
+- `analysis_robustness.png`：可选 robustness 总览，左边是不同响应窗口，右边是 Louvain 参数网格复跑。
+
+analysis 的 JSON/CSV 诊断更适合脚本筛选：
+
+- `selection_funnel.json` 与 `selection_funnel.csv`：记录 total、active、finite OSI、OSI pass、selected、classified 和 unclassified selected 的数量。
+- `direction_tuning.json` 与 `ensemble_direction_tuning.csv`：记录 ensemble preferred direction、modulation index、direction-selective count 和 coverage。
+- `graph_diagnostics.json`：记录 similarity kind、positive similarity fraction、thresholded edge density、degree 分布、isolated node 和 weak-module-degree 候选数。
+- `unclassified_diagnostics.json`：记录 not active、OSI 不可用、低于 OSI 阈值、随机抽样移除、当前 filter 未选中、Louvain 未分类、weak module degree 移除和 small cluster 移除。
+- `robustness_windows.csv` 与 `robustness_louvain.csv`：记录每个复跑 variant 的 status、selected neurons 和 metrics summary 标量。
 
 ## 随机性边界
 

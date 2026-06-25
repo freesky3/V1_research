@@ -54,6 +54,30 @@ def _simulation_bundle(tmp_path, *, with_trajectory: bool = True):
     return run_dir
 
 
+def _trial_simulation_bundle(tmp_path):
+    run_dir = create_run_dir(tmp_path / "runs", "simulate")
+    save_model_state(run_dir / "model", _four_exc_model())
+    orientation_angles = np.array([0.0, np.pi / 2.0])
+    trial_direction_indices = np.array([0, 1, 0, 1])
+    trial_rates = np.array(
+        [
+            [4.0, 4.0, 1.0, 1.0],
+            [1.0, 1.0, 5.0, 5.0],
+            [6.0, 6.0, 1.0, 1.0],
+            [1.0, 1.0, 7.0, 7.0],
+        ]
+    )
+    np.save(run_dir / "arrays" / "orientation_angles.npy", orientation_angles)
+    np.save(run_dir / "arrays" / "trial_direction_indices.npy", trial_direction_indices)
+    np.save(run_dir / "arrays" / "trial_orientation_angles.npy", orientation_angles[trial_direction_indices])
+    np.save(run_dir / "arrays" / "trial_phase_offsets.npy", np.zeros(trial_direction_indices.size))
+    np.save(run_dir / "arrays" / "time.npy", np.array([0.0, 0.1, 0.2]))
+    np.save(run_dir / "arrays" / "excitatory_rates.npy", trial_rates)
+    np.save(run_dir / "arrays" / "excitatory_trajectory.npy", np.repeat(trial_rates[np.newaxis, :, :], 3, axis=0))
+    write_manifest(run_dir, {"workflow": "simulate"})
+    return run_dir
+
+
 def test_analysis_workflow_reads_simulation_bundle_and_writes_outputs(tmp_path) -> None:
     run_dir = _simulation_bundle(tmp_path)
     cfg = AnalysisWorkflowConfig(
@@ -90,6 +114,36 @@ def test_analysis_workflow_reads_simulation_bundle_and_writes_outputs(tmp_path) 
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["analysis"]["status"] == "ok"
     assert "selection_funnel" in manifest["analysis_outputs"]
+
+
+def test_analysis_workflow_aggregates_trial_responses_and_writes_direction_tuning(tmp_path) -> None:
+    run_dir = _trial_simulation_bundle(tmp_path)
+    cfg = AnalysisWorkflowConfig(
+        simulation_run=run_dir,
+        analysis=AnalysisConfig(
+            osi_threshold=0.0,
+            filter_by_osi=False,
+            louvain=LouvainConfig(num_runs=1, consensus_reps=1, min_cluster_size=1),
+        ),
+    )
+
+    result = run_analysis_workflow(cfg)
+
+    np.testing.assert_allclose(
+        result.result.responses_mean,
+        np.array(
+            [
+                [5.0, 1.0],
+                [5.0, 1.0],
+                [1.0, 6.0],
+                [1.0, 6.0],
+            ]
+        ),
+    )
+    assert (run_dir / "analysis" / "direction_tuning.json").is_file()
+    assert (run_dir / "tables" / "ensemble_direction_tuning.csv").is_file()
+    assert (run_dir / "figures" / "ensemble_direction_tuning.png").is_file()
+    assert "direction_selective_ensembles" in result.summary
 
 
 def test_analysis_workflow_falls_back_to_mean_rates_without_trajectory(tmp_path) -> None:

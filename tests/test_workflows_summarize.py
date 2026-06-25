@@ -30,6 +30,10 @@ def test_summarize_run_reads_simulation_analysis_and_training_tables(tmp_path) -
     np.save(run_dir / "arrays" / "excitatory_rates.npy", np.array([[1.0], [3.0]]))
     write_json(run_dir / "analysis" / "metrics.json", {"n_ensembles": 2, "classified_fraction": 0.5})
     write_json(
+        run_dir / "analysis" / "direction_tuning.json",
+        {"direction_selective_ensembles": 2, "covered_direction_count": 2},
+    )
+    write_json(
         run_dir / "analysis" / "simulation_health.json",
         {
             "status": "warn",
@@ -61,6 +65,8 @@ def test_summarize_run_reads_simulation_analysis_and_training_tables(tmp_path) -
     assert summary["model.n_exc"] == 1
     assert summary["rates.exc_mean"] == 2.0
     assert summary["analysis.n_ensembles"] == 2
+    assert summary["analysis.direction_selective_ensembles"] == 2
+    assert summary["analysis.covered_direction_count"] == 2
     assert summary["simulation_health.status"] == "warn"
     assert summary["simulation_health.warning_count"] == 2
     assert summary["simulation_health.metrics.exc_active_fraction"] == 0.5

@@ -2,6 +2,7 @@
 
 from v1_research.analysis.communities import CommunityResult, LouvainConfig, identify_communities
 from v1_research.analysis.diagnostics import graph_health_diagnostics, selection_funnel, unclassified_diagnostics
+from v1_research.analysis.direction_tuning import DirectionTuningConfig, summarize_direction_tuning
 from v1_research.analysis.osi import compute_osi
 from v1_research.analysis.overlap import LabelOverlapResult, compare_label_sets, overlap_significance
 from v1_research.analysis.pipeline import AnalysisConfig, AnalysisInputs, AnalysisResult, run_analysis
@@ -13,6 +14,7 @@ __all__ = [
     "AnalysisInputs",
     "AnalysisResult",
     "CommunityResult",
+    "DirectionTuningConfig",
     "LabelOverlapResult",
     "LouvainConfig",
     "compare_label_sets",
@@ -25,5 +27,6 @@ __all__ = [
     "run_window_analysis",
     "selection_funnel",
     "summarize_robustness",
+    "summarize_direction_tuning",
     "unclassified_diagnostics",
 ]

@@ -56,6 +56,14 @@ def write_analysis_result(result: AnalysisResult, output_dir: str | Path, *, tab
         paths["ensemble_metrics"] = ensemble_path
         if table_dir != analysis_dir:
             paths["analysis_metrics"] = write_json(analysis_dir / "metrics.json", summary)
+    direction_summary = result.diagnostics.get("direction_tuning_summary")
+    direction_rows = result.diagnostics.get("direction_tuning_rows")
+    if isinstance(direction_summary, dict) and isinstance(direction_rows, list):
+        paths["direction_tuning"] = write_json(analysis_dir / "direction_tuning.json", direction_summary)
+        paths["ensemble_direction_tuning"] = write_csv_rows(
+            table_dir / "ensemble_direction_tuning.csv",
+            direction_rows,
+        )
     return paths
 
 

@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 from scipy import signal
 
 from v1_research.analysis.communities import CommunityResult, LouvainConfig, identify_communities
+from v1_research.analysis.direction_tuning import DirectionTuningConfig, summarize_direction_tuning
 from v1_research.analysis.metrics import activity_health_metrics, summarize_communities
 from v1_research.analysis.osi import compute_osi
 from v1_research.runs import load_model_state
@@ -28,6 +29,7 @@ class AnalysisConfig:
     trace_source_hz: float = 100.0
     trace_target_hz: float = 4.0
     louvain: LouvainConfig = field(default_factory=LouvainConfig)
+    direction_tuning: DirectionTuningConfig = field(default_factory=DirectionTuningConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +40,8 @@ class AnalysisInputs:
     coords: NDArray[np.float64]
     distance: NDArray[np.float64]
     orientation_angles: NDArray[np.float64]
+    trial_responses: NDArray[np.float64] | None = None
+    trial_direction_indices: NDArray[np.int64] | None = None
 
     def validate(self) -> None:
         """Checks shape invariants that would otherwise silently corrupt analysis."""
@@ -59,6 +63,26 @@ class AnalysisInputs:
             raise ValueError(
                 f"orientation_angles must have shape ({n_orientation},), got {orientation_angles.shape}."
             )
+        trial_responses = None if self.trial_responses is None else np.asarray(self.trial_responses, dtype=float)
+        trial_direction_indices = (
+            None if self.trial_direction_indices is None else np.asarray(self.trial_direction_indices, dtype=np.int64)
+        )
+        if trial_responses is not None:
+            if trial_responses.ndim != 3:
+                raise ValueError("trial_responses must have shape (n_neurons, n_trial, n_time).")
+            if trial_responses.shape[0] != n_neurons or trial_responses.shape[2] != n_time:
+                raise ValueError("trial_responses must share neuron and time dimensions with responses.")
+            if not np.all(np.isfinite(trial_responses)):
+                raise ValueError("trial_responses contains NaN or infinite values.")
+            if trial_direction_indices is None:
+                raise ValueError("trial_direction_indices is required when trial_responses is provided.")
+            if trial_direction_indices.shape != (trial_responses.shape[1],):
+                raise ValueError(
+                    f"trial_direction_indices must have shape ({trial_responses.shape[1]},), "
+                    f"got {trial_direction_indices.shape}."
+                )
+            if np.any((trial_direction_indices < 0) | (trial_direction_indices >= n_orientation)):
+                raise ValueError("trial_direction_indices contains directions outside orientation_angles.")
         for name, values in (
             ("responses", responses),
             ("coords", coords),
@@ -133,6 +157,13 @@ def run_analysis(cfg: AnalysisConfig, inputs: AnalysisInputs) -> AnalysisResult:
             osi=osi[selected],
             preferred_orientation=preferred[selected],
         )
+        _add_direction_tuning_diagnostics(
+            diagnostics,
+            labels=np.zeros(selected.size, dtype=np.int64),
+            responses_mean=responses_mean[selected],
+            orientation_angles=inputs.orientation_angles,
+            cfg=cfg.direction_tuning,
+        )
         diagnostics["metrics_summary"] = summary
         diagnostics["ensemble_metrics"] = rows
         return AnalysisResult(
@@ -149,8 +180,13 @@ def run_analysis(cfg: AnalysisConfig, inputs: AnalysisInputs) -> AnalysisResult:
         )
 
     selected_steady = steady_state[selected]
+    louvain_steady = (
+        np.asarray(inputs.trial_responses, dtype=float)[selected, :, steady_start:]
+        if inputs.trial_responses is not None
+        else selected_steady
+    )
     activity_trace, decimation_factor = ensemble_activity_trace(
-        selected_steady,
+        louvain_steady,
         source_hz=cfg.trace_source_hz,
         target_hz=cfg.trace_target_hz,
     )
@@ -163,6 +199,13 @@ def run_analysis(cfg: AnalysisConfig, inputs: AnalysisInputs) -> AnalysisResult:
         coords=selected_coords,
         osi=osi[selected],
         preferred_orientation=preferred[selected],
+    )
+    _add_direction_tuning_diagnostics(
+        diagnostics,
+        labels=communities.labels,
+        responses_mean=responses_mean[selected],
+        orientation_angles=inputs.orientation_angles,
+        cfg=cfg.direction_tuning,
     )
     diagnostics["metrics_summary"] = summary
     diagnostics["ensemble_metrics"] = rows
@@ -242,20 +285,43 @@ def load_analysis_inputs_from_simulation(run_dir: str | Path, *, center_side_fra
     orientation_path = arrays / "orientation_angles.npy"
     trajectory_path = arrays / "excitatory_trajectory.npy"
     rates_path = arrays / "excitatory_rates.npy"
+    trial_direction_path = arrays / "trial_direction_indices.npy"
     if not orientation_path.exists():
         raise FileNotFoundError(f"Missing orientation angles: {orientation_path}")
+    orientation_angles = np.asarray(np.load(orientation_path), dtype=float)
+    trial_responses = None
+    trial_direction_indices = None
     if trajectory_path.exists():
         trajectory = np.load(trajectory_path)
-        responses = np.transpose(np.asarray(trajectory, dtype=float), (2, 1, 0))
+        batch_responses = np.transpose(np.asarray(trajectory, dtype=float), (2, 1, 0))
+        if trial_direction_path.exists():
+            trial_direction_indices = np.asarray(np.load(trial_direction_path), dtype=np.int64).reshape(-1)
+            trial_responses = batch_responses
+            responses = direction_average_trial_responses(
+                trial_responses,
+                trial_direction_indices,
+                n_orientations=orientation_angles.size,
+            )
+        else:
+            responses = batch_responses
     elif rates_path.exists():
         rates = np.asarray(np.load(rates_path), dtype=float)
         if rates.ndim != 2:
-            raise ValueError("excitatory_rates.npy must have shape (n_orientation, n_exc).")
-        responses = np.transpose(rates, (1, 0))[:, :, np.newaxis]
+            raise ValueError("excitatory_rates.npy must have shape (n_batch, n_exc).")
+        batch_responses = np.transpose(rates, (1, 0))[:, :, np.newaxis]
+        if trial_direction_path.exists():
+            trial_direction_indices = np.asarray(np.load(trial_direction_path), dtype=np.int64).reshape(-1)
+            trial_responses = batch_responses
+            responses = direction_average_trial_responses(
+                trial_responses,
+                trial_direction_indices,
+                n_orientations=orientation_angles.size,
+            )
+        else:
+            responses = batch_responses
     else:
         raise FileNotFoundError(f"Missing excitatory trajectory or rates under {arrays}.")
 
-    orientation_angles = np.asarray(np.load(orientation_path), dtype=float)
     model = load_model_state(root / "model")
     exc_idx = model.layout.exc_idx
     coords = model.layout.l23.coords[exc_idx]
@@ -268,10 +334,54 @@ def load_analysis_inputs_from_simulation(run_dir: str | Path, *, center_side_fra
         coords = coords[keep]
         distance = distance[np.ix_(keep, keep)]
         responses = responses[keep]
+        if trial_responses is not None:
+            trial_responses = trial_responses[keep]
 
     return AnalysisInputs(
         responses=np.asarray(responses, dtype=float),
         coords=np.asarray(coords, dtype=float),
         distance=np.asarray(distance, dtype=float),
         orientation_angles=orientation_angles,
+        trial_responses=None if trial_responses is None else np.asarray(trial_responses, dtype=float),
+        trial_direction_indices=trial_direction_indices,
     )
+
+
+def direction_average_trial_responses(
+    trial_responses: NDArray[np.float64],
+    trial_direction_indices: NDArray[np.int64],
+    *,
+    n_orientations: int,
+) -> NDArray[np.float64]:
+    """Averages repeated trials into one response trace per direction."""
+
+    trials = np.asarray(trial_responses, dtype=float)
+    indices = np.asarray(trial_direction_indices, dtype=np.int64).reshape(-1)
+    if trials.ndim != 3:
+        raise ValueError("trial_responses must have shape (n_neurons, n_trial, n_time).")
+    if indices.shape != (trials.shape[1],):
+        raise ValueError(f"trial_direction_indices must have shape ({trials.shape[1]},), got {indices.shape}.")
+    if np.any((indices < 0) | (indices >= int(n_orientations))):
+        raise ValueError("trial_direction_indices contains directions outside orientation_angles.")
+    responses = np.empty((trials.shape[0], int(n_orientations), trials.shape[2]), dtype=float)
+    for direction in range(int(n_orientations)):
+        mask = indices == direction
+        if not np.any(mask):
+            raise ValueError(f"No trials found for direction index {direction}.")
+        responses[:, direction, :] = np.mean(trials[:, mask, :], axis=1)
+    return responses
+
+
+def _add_direction_tuning_diagnostics(
+    diagnostics: dict[str, Any],
+    *,
+    labels: NDArray[np.int64],
+    responses_mean: NDArray[np.float64],
+    orientation_angles: NDArray[np.float64],
+    cfg: DirectionTuningConfig,
+) -> None:
+    if not cfg.enabled:
+        return
+    summary, rows = summarize_direction_tuning(labels, responses_mean, orientation_angles, cfg)
+    diagnostics["direction_tuning_summary"] = summary
+    diagnostics["direction_tuning_rows"] = rows

@@ -5,7 +5,7 @@ model:
     n_side: 2
     region_size: 1.0
     all_tuned: true
-    n_orientations: 4
+    n_orientations: 8
   l23:
     n_side: 2
     inhibitory_fraction: 0.0
@@ -25,7 +25,7 @@ grating:
   luminance: 1.0
   contrast: 1.0
   temporal_frequency: 6.283185307179586
-  n_orientations: 4
+  n_orientations: 8
   receptive_field:
     stimulus_size: 0.5
     resolution: 7
@@ -34,6 +34,11 @@ grating:
       gamma: 1.0
       spatial_frequency: 1.0
       phase: 0.0
+trials:
+  repeats_per_direction: 4
+  shuffle: true
+  random_phase: true
+  phase_jitter: 0.35
 background:
   enabled: false
 time: [0.0, 0.01, 0.02]
