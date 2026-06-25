@@ -44,8 +44,18 @@ def test_grating_simulation_writes_run_bundle_from_checkpoint(tmp_path) -> None:
     np.testing.assert_allclose(np.load(result.array_paths["orientation_angles"]), result.orientation_angles)
     assert np.load(result.array_paths["excitatory_rates"]).shape == (3, 1)
     assert np.load(result.array_paths["excitatory_trajectory"]).shape == (3, 3, 1)
+    assert (result.run_dir / "analysis" / "simulation_health.json").is_file()
+    for name in [
+        "simulate_overview.png",
+        "simulate_orientation_heatmaps.png",
+        "simulate_traces.png",
+    ]:
+        assert (result.run_dir / "figures" / name).is_file()
+    assert result.summary["health_status"] in {"ok", "warn", "fail"}
 
     manifest = json.loads((result.run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["workflow"] == "simulate"
     assert manifest["solver"] == "scipy"
     assert manifest["summary"]["n_orientations"] == 3
+    assert manifest["outputs"]["simulation_health"] == "analysis/simulation_health.json"
+    assert manifest["outputs"]["simulate_overview"] == "figures/simulate_overview.png"

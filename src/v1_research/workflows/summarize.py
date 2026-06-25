@@ -33,6 +33,7 @@ def summarize_run(run_dir: str | Path) -> dict[str, Any]:
     _add_rate_summary(summary, root / "arrays" / "excitatory_rates.npy", prefix="rates.exc")
     _add_rate_summary(summary, root / "arrays" / "inhibitory_rates.npy", prefix="rates.inh")
     _add_analysis_summary(summary, root / "analysis" / "metrics.json")
+    _add_simulation_health_summary(summary, root / "analysis" / "simulation_health.json")
     _add_training_health_summary(summary, root / "analysis" / "training_health.json")
     _add_table_summary(summary, root / "tables" / "training_log.csv", prefix="training_log")
     _add_table_summary(summary, root / "tables" / "training_diagnostics.csv", prefix="training_diagnostics")
@@ -76,6 +77,20 @@ def _add_training_health_summary(summary: dict[str, Any], path: Path) -> None:
         for key, value in final.items():
             if isinstance(value, int | float | str) or value is None:
                 summary[f"training_health.final.{key}"] = value
+
+
+def _add_simulation_health_summary(summary: dict[str, Any], path: Path) -> None:
+    if not path.exists():
+        return
+    payload = _read_json(path)
+    for key in ("status", "warning_count", "failure_count"):
+        if key in payload:
+            summary[f"simulation_health.{key}"] = payload[key]
+    metrics = payload.get("metrics", {})
+    if isinstance(metrics, dict):
+        for key, value in metrics.items():
+            if isinstance(value, int | float | str) or value is None:
+                summary[f"simulation_health.metrics.{key}"] = value
 
 
 def _add_table_summary(summary: dict[str, Any], path: Path, *, prefix: str) -> None:

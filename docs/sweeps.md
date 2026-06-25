@@ -46,6 +46,7 @@ SweepConfig
 -> expand_grid(parameters)
 -> 每个 grid point merge 到 base
 -> 用现有 CLI dataclass 构造逻辑生成目标 workflow config
+-> 若 workflow=simulate 且未显式请求 inspection，则覆盖为轻量仿真配置
 -> 调用 run_training / run_grating_simulation / run_analysis_workflow / run_train_then_simulate
 -> 写 sweep run bundle
 ```
@@ -65,6 +66,31 @@ parameters:
   grating:
     visual_gain: [0.5, 1.0]
 ```
+
+### simulate sweep 的轻量默认
+
+普通 `simulate` workflow 默认保存完整 trajectory、写 `analysis/simulation_health.json` 并生成三张诊断图。`sweep` 调用 `simulate` 时默认相反：如果 `base` 没有显式写 `inspection`，会补上轻量 inspection 配置；如果同时没有显式写 `solver.store_trajectory`，也会补成轻量 trajectory 配置：
+
+```yaml
+inspection:
+  enabled: false
+  save_plots: false
+solver:
+  store_trajectory: false
+```
+
+这样扫参默认只保存均值 rate、orientation、time、model 和 manifest，避免每个 grid point 都写大 trajectory 或三张图。需要把某个 sweep 当作完整诊断批处理时，必须在 `base` 或 `parameters` 中显式打开：
+
+```yaml
+base:
+  inspection:
+    enabled: true
+    save_plots: true
+  solver:
+    store_trajectory: true
+```
+
+如果只想保存 trajectory 供后续 `analyze` 使用，但不想生成 simulation health 和图，可以显式设置 `solver.store_trajectory=true`、`inspection.enabled=false`。
 
 ## 输出
 
@@ -90,6 +116,8 @@ runs/sweep/<timestamp>/
 - 目标 workflow 返回的 `summary.*` 字段
 
 如果某个 grid point 抛错，sweep 记录 `status=error` 和 `error`，然后继续下一个点。CSV 会先归一化列名，所以即使第一行失败、后续行成功，后续 `summary.*` 列也不会丢失。
+
+当目标 workflow 是 `simulate` 且显式开启 inspection 时，`summary.*` 中会包含 `summary.health_status`、`summary.health_warning_count`、`summary.final_exc_active_fraction`、`summary.final_exc_top1_activity_fraction` 等健康摘要。默认轻量 simulate sweep 不生成这些列。
 
 对 `analyze` workflow 做 sweep 时，analysis metrics summary 中的标量会自动进入 `summary.*` 列，例如：
 

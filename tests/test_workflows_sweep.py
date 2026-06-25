@@ -74,6 +74,32 @@ def test_run_sweep_writes_csv_and_manifest(tmp_path, monkeypatch) -> None:
     assert manifest["summary"]["runs"] == 2
 
 
+def test_simulate_sweep_defaults_to_lightweight_inspection(tmp_path, monkeypatch) -> None:
+    captured = []
+
+    def fake_simulation(cfg):
+        captured.append((cfg.solver.store_trajectory, cfg.inspection.enabled, cfg.inspection.save_plots))
+        run_dir = tmp_path / "runs" / "simulate" / "run_1"
+        run_dir.mkdir(parents=True)
+        return FakeRun(run_dir, {"n_orientations": cfg.grating.n_orientations})
+
+    monkeypatch.setattr("v1_research.workflows.sweep.run_grating_simulation", fake_simulation)
+
+    run_sweep(
+        SweepConfig(
+            workflow="simulate",
+            run_root=tmp_path / "runs",
+            base={
+                "solver": {"backend": "scipy"},
+                "grating": {"n_orientations": 4},
+            },
+            parameters={"grating.visual_gain": [100.0]},
+        )
+    )
+
+    assert captured == [(False, False, False)]
+
+
 def test_run_sweep_records_failure_and_continues(tmp_path, monkeypatch) -> None:
     calls = []
 

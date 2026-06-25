@@ -88,7 +88,7 @@ from v1_research.workflows import SimulationWorkflowConfig, run_grating_simulati
 result = run_grating_simulation(SimulationWorkflowConfig(model_checkpoint="runs/train/.../model"))
 ```
 
-`SimulationWorkflowConfig` 位于 `workflows/simulate.py`，组合 `ModelConfig`、`SolverConfig`、`DriftingGratingConfig`、`BackgroundConfig`、time grid 和可选 `model_checkpoint`。
+`SimulationWorkflowConfig` 位于 `workflows/simulate.py`，组合 `ModelConfig`、`SolverConfig`、`DriftingGratingConfig`、`BackgroundConfig`、time grid、可选 `model_checkpoint` 和 `SimulationInspectionConfig`。单次 `simulate` 默认 `inspection.enabled=True`、`inspection.save_plots=True`，用于把一次仿真直接变成健康检查入口；如果要只保存轻量 rate 数组，可以显式关闭 `inspection.enabled` 并把 `solver.store_trajectory=false`。
 
 数据流：
 
@@ -98,11 +98,14 @@ SimulationWorkflowConfig
 -> DriftingGratingInput(cfg.grating, model.layout)
 -> stimulus.make_batched_drive_func(orientation_angles)
 -> solve_rates(...)
+-> optional compute_simulation_health(...) from full trajectory
 -> arrays/excitatory_rates.npy
 -> arrays/inhibitory_rates.npy
 -> arrays/time.npy
 -> arrays/orientation_angles.npy
 -> optional trajectory arrays
+-> optional analysis/simulation_health.json
+-> optional figures/simulate_overview.png / simulate_orientation_heatmaps.png / simulate_traces.png
 -> model/state.npz
 -> manifest.json
 ```
@@ -113,6 +116,7 @@ SimulationWorkflowConfig
 - `excitatory_rates.npy` shape 为 `(n_orientations, n_exc)`。
 - `inhibitory_rates.npy` shape 为 `(n_orientations, n_inh)`。
 - 若 `SolverConfig.store_trajectory=True`，trajectory shape 为 `(n_time, n_orientations, n_exc/n_inh)`。
+- `simulation_health.json` 直接从 trajectory 计算 activity、silent fraction、top1/top5 concentration、near-rate-cap、front/tail drift、tail variance、step-to-step change，以及 stimulus/background 输入分布。OSI、community 和 ensemble metrics 仍由 `analyze` workflow 负责。
 
 ## Full Workflow
 
@@ -171,7 +175,9 @@ SweepConfig
 -> manifest.json
 ```
 
-sweep 失败边界很简单：单个 grid point 报错时，在 `tables/runs.csv` 记录 `status=error` 和 `error`，然后继续下一个点。成功行记录目标 workflow 的 `run_dir` 和扁平化的 `summary.*` 字段。`analyze` workflow 会把 metrics summary 中的标量也放进 `summary`，所以 sweep 可以直接记录 `summary.n_ensembles`、`summary.classified_fraction`、`summary.osi_mean` 等字段，不需要专用分析 sweep 脚本。
+sweep 失败边界很简单：单个 grid point 报错时，在 `tables/runs.csv` 记录 `status=error` 和 `error`，然后继续下一个点。成功行记录目标 workflow 的 `run_dir` 和扁平化的 `summary.*` 字段。`simulate` sweep 有一层专门的轻量默认：如果 base 没有显式写 `inspection`，会关闭 simulation inspection 和 plot，并在没有显式要求完整诊断时设置 `solver.store_trajectory=false`。需要完整仿真健康报告时，在 sweep base 或参数网格中显式设置 `inspection.enabled=true` 和 `solver.store_trajectory=true`。
+
+`analyze` workflow 会把 metrics summary 中的标量也放进 `summary`，所以 sweep 可以直接记录 `summary.n_ensembles`、`summary.classified_fraction`、`summary.osi_mean` 等字段，不需要专用分析 sweep 脚本。
 
 ## Analysis Workflow
 
@@ -220,7 +226,7 @@ uv run v1-simulation summarize --run runs/simulate/...
 
 CLI 使用 `OmegaConf.load(...)` 和 `OmegaConf.from_dotlist(...)` 做 YAML + `key=value` override，然后递归构造对应 workflow dataclass。这里没有全局 schema，也不接管 random seed；主程序仍应在进入 workflow 前统一设置全局 seed。
 
-`summarize` 是只读入口，读取新 run bundle 的 manifest、model checkpoint、常见 arrays、analysis metrics 和训练表，写出 compact `summary.json` 或用户指定输出路径。不兼容旧 artifact 名。
+`summarize` 是只读入口，读取新 run bundle 的 manifest、model checkpoint、常见 arrays、analysis metrics、`analysis/training_health.json`、`analysis/simulation_health.json` 和训练表，写出 compact `summary.json` 或用户指定输出路径。不兼容旧 artifact 名。
 
 ## 随机性和边界
 

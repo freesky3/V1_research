@@ -130,6 +130,8 @@ def _flatten_parameter_map(parameters: Mapping[str, Any], prefix: str = "") -> d
 def _workflow_config(workflow: WorkflowName, payload: dict[str, Any]) -> Any:
     from v1_research.cli import dataclass_from_mapping
 
+    if workflow == "simulate":
+        payload = _simulate_sweep_payload(payload)
     cls = {
         "train": TrainingWorkflowConfig,
         "simulate": SimulationWorkflowConfig,
@@ -137,6 +139,30 @@ def _workflow_config(workflow: WorkflowName, payload: dict[str, Any]) -> Any:
         "full": FullWorkflowConfig,
     }[workflow]
     return dataclass_from_mapping(cls, payload)
+
+
+def _simulate_sweep_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    data = dict(payload)
+    inspection_present = "inspection" in data
+    inspection = data.get("inspection")
+    if isinstance(inspection, Mapping):
+        inspection_opens_full = bool(inspection.get("enabled", True))
+    else:
+        inspection_opens_full = inspection_present
+
+    if not inspection_present:
+        data["inspection"] = {"enabled": False, "save_plots": False}
+    elif isinstance(inspection, Mapping):
+        inspection_data = dict(inspection)
+        if not bool(inspection_data.get("enabled", True)):
+            inspection_data.setdefault("save_plots", False)
+        data["inspection"] = inspection_data
+
+    solver = dict(data.get("solver", {}))
+    if "store_trajectory" not in solver and not inspection_opens_full:
+        solver["store_trajectory"] = False
+    data["solver"] = solver
+    return data
 
 
 def _dispatch(workflow: WorkflowName, cfg: Any, *, show_progress: bool) -> Any:

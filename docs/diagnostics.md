@@ -1,14 +1,16 @@
-# 训练诊断与健康报告
+# 训练与仿真诊断健康报告
 
-本文说明当前训练阶段的诊断代码如何组织，以及 `inspection.enabled=true` 时 run bundle 会写出哪些健康报告、表格和机制图。它面向需要判断训练是否过于静默、过度活跃、活动过度集中，或 BCM row-sum cap 压力过大的研究者。
+本文说明当前训练与 drifting-grating 仿真阶段的诊断代码如何组织，以及 `inspection.enabled=true` 时 run bundle 会写出哪些健康报告、表格和机制图。它面向需要判断训练或单次仿真是否过于静默、过度活跃、活动过度集中，是否接近 firing-rate cap，或 BCM row-sum cap 压力过大的研究者。
 
 ## 推荐阅读顺序
 
 1. `src/v1_research/workflows/train.py`：从 `TrainingWorkflowConfig`、`TrainingInspectionConfig` 和 `run_training(...)` 看训练入口与落盘逻辑。
 2. `src/v1_research/learning/diagnostics.py`：看纯诊断函数、`TrainingHealthConfig` 和 `evaluate_training_health(...)`。
-3. `src/v1_research/learning/bcm.py`：看 BCM state、theta、row-sum cap 与 plastic weight 更新机制。
-4. `src/v1_research/workflows/summarize.py`：看 run bundle 如何被压缩成 sweep 友好的 summary。
-5. `docs/learning.md` 与 `docs/workflows.md`：补充理解训练规则和 CLI workflow 边界。
+3. `src/v1_research/workflows/simulation_health.py`：看 simulation 专用的 `SimulationHealthConfig`、`compute_simulation_health(...)` 和 `save_simulation_figures(...)`。
+4. `src/v1_research/workflows/simulate.py`：看 `SimulationInspectionConfig` 如何把健康报告接入单次 grating simulation。
+5. `src/v1_research/learning/bcm.py`：看 BCM state、theta、row-sum cap 与 plastic weight 更新机制。
+6. `src/v1_research/workflows/summarize.py`：看 run bundle 如何被压缩成 sweep 友好的 summary。
+7. `docs/learning.md` 与 `docs/workflows.md`：补充理解训练规则和 CLI workflow 边界。
 
 ## 入口与配置
 
@@ -151,6 +153,57 @@ run_training(...)
 
 事件写入 `tables/training_health_events.csv`。每行包含 `step`、`severity`、`metric`、`value`、`threshold`、`rule` 和 `message`，方便 sweep 后筛选最早异常或最高频异常。
 
+## Simulation 健康报告
+
+单次 grating simulation 的入口函数仍是 `run_grating_simulation(cfg: SimulationWorkflowConfig)`。本地诊断配置挂在 `SimulationWorkflowConfig.inspection`，定义于 `src/v1_research/workflows/simulate.py`：
+
+```python
+SimulationInspectionConfig(
+    enabled=True,
+    save_plots=True,
+    health=SimulationHealthConfig(),
+)
+```
+
+`simulate` 默认开启完整诊断，前提是 `solver.store_trajectory=True`，因为健康报告直接从完整 E/I trajectory 计算。`sweep` 在构造 simulate config 时会默认覆盖为轻量模式：`inspection.enabled=false`、`inspection.save_plots=false`，且在没有显式要求完整诊断时设置 `solver.store_trajectory=false`。这样单次 `simulate` 面向检查，批量 `sweep` 面向吞吐。
+
+仿真诊断数据流：
+
+```text
+run_grating_simulation(...)
+-> DriftingGratingInput.make_batched_drive_func(orientation_angles)
+-> solve_rates(...) 得到 RateResult
+-> _sample_stimulus_trace(...)
+-> compute_simulation_health(...)
+   -> population activity metrics
+   -> activity concentration metrics
+   -> near-rate-cap metrics
+   -> front/tail drift and step-to-step change
+   -> stimulus/background distribution metrics
+-> analysis/simulation_health.json
+-> optional figures/simulate_*.png
+```
+
+主要数组形状：
+
+- `RateResult.exc_trajectory`: `(n_time, n_orientations, n_exc)`。
+- `RateResult.inh_trajectory`: `(n_time, n_orientations, n_inh)`。
+- sampled stimulus trace: `(n_time, n_orientations, n_input)`。
+- `BackgroundTrace.exc`: `(n_time, n_orientations, n_exc)`，`BackgroundTrace.inh`: `(n_time, n_orientations, n_inh)`。
+
+`compute_simulation_health(...)` 会生成 `analysis/simulation_health.json`，包含：
+
+- `schema_version`
+- `status`: `ok | warn | fail`
+- `thresholds`: 本次使用的 `SimulationHealthConfig`
+- `warning_count`、`failure_count`
+- `metrics`: 展开的 activity、concentration、stability、stimulus/background 指标
+- `events`: 触发阈值的健康事件
+
+核心 metric 前缀为 `exc_*` 和 `inh_*`。活动指标包括 `active_fraction`、`silent_fraction`、`mean`、`median`、`p95`、`max`。集中度指标包括 `top1_activity_fraction` 和 `top5_activity_fraction`。若 `solver.transfer.rate_max` 存在，还会用 `rate_max * near_rate_cap_ratio` 计算 `near_rate_cap_fraction`。稳定性指标包括 `front_mean`、`back_mean`、`tail_mean`、`tail_variance`、`mean_drift`、`relative_mean_drift`、`step_mean_abs_change`、`step_p95_abs_change` 和 `step_max_abs_change`。
+
+输入上下文指标使用 `stimulus_*`、`background_exc_*`、`background_inh_*` 前缀记录 mean、median、p05、p95、max。它们不替代 OSI/community 分析，只帮助解释仿真本身的输入强度与背景噪声范围。
+
 ## Run Bundle 产物
 
 开启 `inspection.enabled=true` 后，训练 run 目录会额外包含：
@@ -191,6 +244,22 @@ runs/train/<timestamp>/
 
 `workflows/summarize.py` 会读取 `analysis/training_health.json`，并把健康状态、计数、首个事件 step 和 `final_metrics` 展开为 `training_health.*` 字段。这样 `summarize` 和 `sweep` 可以在不解析大 CSV 的情况下比较训练健康状态。
 
+开启 `simulate.inspection.enabled=true` 后，simulation run 目录会额外包含：
+
+```text
+runs/simulate/<timestamp>/
+  analysis/
+    simulation_health.json
+  figures/
+    simulate_overview.png                 # save_plots=True
+    simulate_orientation_heatmaps.png     # save_plots=True
+    simulate_traces.png                   # save_plots=True
+```
+
+`manifest.json.outputs` 会记录 `simulation_health` 与三张核心图的相对路径。`manifest.json.summary` 与 `SimulationRun.summary` 会加入 sweep 友好的标量，例如 `health_status`、`health_warning_count`、`health_failure_count`、`final_exc_active_fraction`、`final_exc_top1_activity_fraction`、`final_exc_near_rate_cap_fraction` 和 `final_exc_relative_mean_drift`。
+
+`workflows/summarize.py` 会读取 `analysis/simulation_health.json`，并把健康状态、计数和 `metrics` 展开为 `simulation_health.*` 字段。这样 CLI `summarize`、`summary.json` 和 sweep CSV 都可以直接看到单次仿真的健康状态。
+
 ## 机制图
 
 `inspection.save_plots=true` 时，`_save_training_figures(...)` 会基于 `training_diagnostics.csv` 的同一组 rows 生成机制图：
@@ -203,6 +272,12 @@ runs/train/<timestamp>/
 - `tracked_weights.png`：只在 `tracked_weight_count > 0` 且找到可跟踪 plastic edge 时生成，展示抽样连接随 step 的权重轨迹。
 
 图像函数不会重新运行训练，也不会重新求解 dynamics；它只消费当前 run 内存中的 diagnostic rows 和 tracked rows。
+
+simulation 图像由 `save_simulation_figures(...)` 生成，也不会重新求解 dynamics。三张图的职责是：
+
+- `simulate_overview.png`：活动比例、静默比例、top1/top5 集中度、near-rate-cap 和稳定性总览。
+- `simulate_orientation_heatmaps.png`：按 orientation 和 cell 展示最终 E/I rates，快速看方向间是否有强烈不均衡。
+- `simulate_traces.png`：按 orientation 展示 E/I population mean trajectory，快速看是否稳定、漂移或震荡。
 
 ## 随机性边界
 
