@@ -65,6 +65,31 @@ def test_cli_config_loader_keeps_optional_null_paths_as_none(tmp_path) -> None:
     assert cfg.model_checkpoint is None
 
 
+def test_cli_train_passes_progress_for_live_status_and_prints_run_dir(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text("run_root: runs\ninspection:\n  enabled: true\n", encoding="utf-8")
+    run_dir = tmp_path / "runs" / "train" / "demo"
+    captured = {}
+
+    def fake_run_training(cfg, *, show_progress: bool = True):
+        captured["show_progress"] = show_progress
+
+        class Result:
+            pass
+
+        result = Result()
+        result.run_dir = run_dir
+        return result
+
+    monkeypatch.setattr(cli, "run_training", fake_run_training)
+
+    result = CliRunner().invoke(cli.app, ["train", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert captured == {"show_progress": True}
+    assert result.output.strip() == str(run_dir)
+
+
 def test_cli_sweep_loads_config_applies_override_and_dispatches(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "sweep.yaml"
     config_path.write_text(

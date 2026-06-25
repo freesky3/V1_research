@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable, Sequence
 from typing import Any
+import sys
 
 import numpy as np
 from numpy.typing import NDArray
@@ -201,6 +202,8 @@ def run_training(cfg: TrainingWorkflowConfig, *, show_progress: bool = True) -> 
     diagnostic_rows: list[dict[str, object]] = []
     tracked_rows: list[dict[str, object]] = []
     per_batch_arrays: list[Path] = []
+    live_warning_count = 0
+    live_failure_count = 0
     for epoch in range(1, int(cfg.epochs) + 1):
         samples = sampler.make_epoch(limit=cfg.natural_images.limit)
         if cfg.natural_images.cache_dir is not None:
@@ -246,20 +249,35 @@ def run_training(cfg: TrainingWorkflowConfig, *, show_progress: bool = True) -> 
             if _should_inspect(cfg.inspection, batches):
                 if not tracked and int(cfg.inspection.tracked_weight_count) > 0:
                     tracked = sample_tracked_weights(previous_model, count=int(cfg.inspection.tracked_weight_count))
-                diagnostic_rows.append(
-                    _training_diagnostic_row(
-                        epoch=epoch,
-                        batch=batch_index,
-                        step=batches,
-                        previous_model=previous_model,
-                        model=model,
-                        state=state,
-                        rates=rates,
-                        active_threshold=cfg.inspection.active_rate_threshold,
-                        near_rate_cap=_near_rate_cap(cfg.solver, cfg.inspection.health),
-                        bcm_cfg=cfg.learning.bcm,
-                    )
+                diagnostic_row = _training_diagnostic_row(
+                    epoch=epoch,
+                    batch=batch_index,
+                    step=batches,
+                    previous_model=previous_model,
+                    model=model,
+                    state=state,
+                    rates=rates,
+                    active_threshold=cfg.inspection.active_rate_threshold,
+                    near_rate_cap=_near_rate_cap(cfg.solver, cfg.inspection.health),
+                    bcm_cfg=cfg.learning.bcm,
                 )
+                diagnostic_rows.append(diagnostic_row)
+                if show_progress:
+                    current_health = evaluate_training_health([diagnostic_row], cfg.inspection.health)
+                    live_warning_count += int(current_health.get("warning_count", 0) or 0)
+                    live_failure_count += int(current_health.get("failure_count", 0) or 0)
+                    print(
+                        _format_live_training_status(
+                            diagnostic_row,
+                            current_health,
+                            warn_total=live_warning_count,
+                            fail_total=live_failure_count,
+                        ),
+                        file=sys.stderr,
+                    )
+                    event_summary = _format_health_event_summary(current_health)
+                    if event_summary:
+                        print(event_summary, file=sys.stderr)
                 if cfg.inspection.save_per_batch_arrays:
                     per_batch_arrays.extend(_save_training_probe_arrays(run_dir, batches, rates, model))
                 tracked_rows.extend(record_tracked_weights(model, tracked, step=batches))
@@ -586,6 +604,78 @@ def _training_health_summary(report: dict[str, object]) -> dict[str, object]:
             if key in final_metrics:
                 summary[f"final_{key}"] = final_metrics[key]
     return summary
+
+
+def _format_live_training_status(
+    row: dict[str, object],
+    report: dict[str, object],
+    *,
+    warn_total: int,
+    fail_total: int,
+) -> str:
+    return " ".join(
+        [
+            "[train]",
+            f"step={_format_int(row.get('step'))}",
+            f"epoch={_format_int(row.get('epoch'))}",
+            f"batch={_format_int(row.get('batch'))}",
+            f"health={report.get('status', 'unknown')}",
+            f"warn_total={int(warn_total)}",
+            f"fail_total={int(fail_total)}",
+            f"exc_active={_format_metric(row.get('exc_active_neuron_fraction'))}",
+            f"inh_active={_format_metric(row.get('inh_active_neuron_fraction'))}",
+            f"top1={_format_metric(row.get('exc_top1_activity_fraction'))}",
+            f"top5={_format_metric(row.get('exc_top5_activity_fraction'))}",
+            f"exc_rate_cap={_format_metric(row.get('exc_near_rate_cap_fraction'))}",
+            f"inh_rate_cap={_format_metric(row.get('inh_near_rate_cap_fraction'))}",
+            f"row_EE_cap={_format_metric(row.get('row_sum_EE_cap_max_ratio'))}",
+            f"row_IE_cap={_format_metric(row.get('row_sum_IE_cap_max_ratio'))}",
+            f"theta_exc={_format_metric(row.get('theta_exc_median'))}",
+            f"theta_inh={_format_metric(row.get('theta_inh_median'))}",
+            f"bcm_exc_above={_format_metric(row.get('bcm_exc_above_theta_fraction'))}",
+            f"bcm_inh_above={_format_metric(row.get('bcm_inh_above_theta_fraction'))}",
+            f"bcm_exc_signal={_format_metric(row.get('bcm_exc_signal_mean'))}",
+            f"bcm_inh_signal={_format_metric(row.get('bcm_inh_signal_mean'))}",
+            f"W_EE_delta+={_format_metric(row.get('W_EE_delta_positive_fraction'))}",
+            f"W_EE_delta-={_format_metric(row.get('W_EE_delta_negative_fraction'))}",
+            f"W_IE_delta+={_format_metric(row.get('W_IE_delta_positive_fraction'))}",
+            f"W_IE_delta-={_format_metric(row.get('W_IE_delta_negative_fraction'))}",
+        ]
+    )
+
+
+def _format_health_event_summary(report: dict[str, object], *, limit: int = 3) -> str | None:
+    events = report.get("events", [])
+    if not isinstance(events, list) or not events:
+        return None
+    shown = events[: int(limit)]
+    parts = [_format_health_event(event) for event in shown if isinstance(event, dict)]
+    remaining = len(events) - len(shown)
+    if remaining > 0:
+        parts.append(f"+{remaining} more")
+    return "[train] events: " + "; ".join(parts)
+
+
+def _format_health_event(event: dict[str, object]) -> str:
+    severity = str(event.get("severity", "event"))
+    metric = str(event.get("metric", "metric"))
+    value = _format_metric(event.get("value"))
+    threshold = _format_metric(event.get("threshold"))
+    return f"{severity} {metric}={value}>{threshold}"
+
+
+def _format_metric(value: object) -> str:
+    converted = _numeric_value(value)
+    if converted is None:
+        return "-"
+    return f"{converted:.3f}"
+
+
+def _format_int(value: object) -> str:
+    converted = _numeric_value(value)
+    if converted is None:
+        return "-"
+    return str(int(converted))
 
 
 def _plot_series(ax, steps: list[int], rows: list[dict[str, object]], names: list[str]) -> bool:

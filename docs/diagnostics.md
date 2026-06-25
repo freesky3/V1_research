@@ -51,6 +51,8 @@ uv run v1-simulation train --config configs/train_smoke.yaml `
 
 `inspection.enabled=false` 时不写训练诊断表和健康报告。`inspection.save_plots=false` 是默认值，用于避免 sweep 或批量实验自动生成大量图片。需要看机制图时显式打开 `inspection.save_plots=true`。
 
+`show_progress=True` 时，训练会在每个 inspected batch 后向 `stderr` 打印一到两行实时健康状态。CLI 默认等价于 `--progress`，会显示这些状态；`--no-progress` 会关闭实时状态打印，但不会影响训练结束后的 CSV、JSON 和图片产物。CLI 的最终 run directory 仍写到 `stdout`，因此脚本可以继续用 stdout 捕获 run 路径。
+
 ## 训练诊断数据流
 
 每个 inspected batch 的数据流如下：
@@ -69,7 +71,10 @@ run_training(...)
    -> row_sum_pressure(...)
    -> extended_plastic_weight_stats(...)
    -> bcm_signal_stats(...)
--> evaluate_training_health(...)
+-> if show_progress:
+   -> evaluate_training_health([current_row], ...)
+   -> print live status to stderr
+-> evaluate_training_health(all_rows, ...)
 -> write run bundle
 ```
 
@@ -100,6 +105,34 @@ run_training(...)
 - BCM signal：`bcm_exc_above_theta_fraction`、`bcm_exc_signal_mean`、`bcm_exc_signal_abs_mean`，以及 `bcm_inh_*`。
 
 旧的 `active_rate_stats(...)`、`plastic_weight_stats(...)`、`theta_stats(...)` 仍保留，用于兼容已有轻量诊断；扩展函数会补充更适合训练机制解释的字段。
+
+## 训练中的实时状态
+
+实时状态打印与 `inspection.probe_every` 对齐：哪一个 batch 会写入 `training_diagnostics.csv`，就在哪一个 batch 后打印状态。默认 CLI `--progress` 会显示，`--no-progress` 会静默。`full` 和 `sweep` 继续透传同一个 progress 开关。
+
+状态行示例：
+
+```text
+[train] step=12 epoch=1 batch=12 health=warn warn_total=3 fail_total=0 exc_active=0.420 inh_active=- top1=0.180 top5=0.640 exc_rate_cap=0.000 inh_rate_cap=- row_EE_cap=0.510 row_IE_cap=- theta_exc=1.030 theta_inh=- bcm_exc_above=0.380 bcm_inh_above=- bcm_exc_signal=-0.024 bcm_inh_signal=- W_EE_delta+=0.410 W_EE_delta-=0.090 W_IE_delta+=- W_IE_delta-=-
+```
+
+如果当前 probe 触发健康事件，会额外打印一行事件摘要：
+
+```text
+[train] events: warn exc_top5_activity_fraction=0.820>0.750; fail exc_active_neuron_fraction=0.000>0.000
+```
+
+字段读取方式：
+
+- `health` 是当前 probe 的 `ok|warn|fail`，不是整个训练最终状态。
+- `warn_total` 和 `fail_total` 是截至当前 probe 的累计事件数量。
+- `exc_active`、`inh_active` 是 per-neuron active fraction；空 population 显示为 `-`。
+- `top1`、`top5` 描述 excitatory activity concentration。
+- `exc_rate_cap`、`inh_rate_cap` 描述接近 firing-rate cap 的比例。
+- `row_EE_cap`、`row_IE_cap` 是 row-sum/cap 最大比值。
+- `theta_*`、`bcm_*` 和 `W_*_delta*` 用于快速判断 BCM signal 与权重更新方向。
+
+实时状态只用于人工观察，不会触发 early stop，也不会改变训练完成语义。完整回顾仍以 `training_diagnostics.csv`、`training_health.json` 和机制图为准。
 
 ## 健康报告语义
 

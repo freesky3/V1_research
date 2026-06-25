@@ -20,6 +20,8 @@ from v1_research.workflows.train import (
     TrainingHealthConfig,
     TrainingInspectionConfig,
     TrainingWorkflowConfig,
+    _format_health_event_summary,
+    _format_live_training_status,
     run_training,
 )
 
@@ -35,17 +37,17 @@ def _write_tiny_iml(path, value: int = 10) -> None:
     pixels.tofile(path)
 
 
-def test_training_workflow_writes_log_checkpoint_and_manifest(tmp_path) -> None:
+def _training_cfg(tmp_path, *, probe_every: int = 1, inhibitory_fraction: float = 0.0) -> TrainingWorkflowConfig:
     image_dir = tmp_path / "images"
     image_dir.mkdir()
     _write_tiny_iml(image_dir / "sample_001.iml")
 
-    cfg = TrainingWorkflowConfig(
+    return TrainingWorkflowConfig(
         run_root=tmp_path / "runs",
         empirical_data_path="data/sample_data.pkl",
         model=ModelConfig(
             l4=L4Config(n_side=1, region_size=1.0, all_tuned=True, n_orientations=1),
-            l23=L23Config(n_side=1, inhibitory_fraction=0.0, region_size=1.0, random_inhibitory=False),
+            l23=L23Config(n_side=1, inhibitory_fraction=inhibitory_fraction, region_size=1.0, random_inhibitory=False),
             p_ee=0.0,
             weight=WeightConfig(base_strength=0.1),
         ),
@@ -77,10 +79,62 @@ def test_training_workflow_writes_log_checkpoint_and_manifest(tmp_path) -> None:
             enabled=True,
             health=TrainingHealthConfig(min_active_neuron_fraction=0.2, max_top1_activity_fraction=0.2),
             tracked_weight_count=1,
+            probe_every=probe_every,
             save_plots=False,
             save_per_batch_arrays=True,
         ),
     )
+
+
+def test_live_training_status_formats_detail_and_missing_values() -> None:
+    row = {
+        "step": 3,
+        "epoch": 1,
+        "batch": 3,
+        "exc_active_neuron_fraction": 0.25,
+        "inh_active_neuron_fraction": None,
+        "exc_top1_activity_fraction": 0.2,
+        "exc_top5_activity_fraction": 0.7,
+        "exc_near_rate_cap_fraction": 0.0,
+        "row_sum_EE_cap_max_ratio": 0.5,
+        "theta_exc_median": 1.0,
+        "bcm_exc_above_theta_fraction": 0.4,
+        "bcm_exc_signal_mean": -0.125,
+        "W_EE_delta_positive_fraction": 0.6,
+        "W_EE_delta_negative_fraction": 0.1,
+    }
+    report = {"status": "warn", "warning_count": 2, "failure_count": 1}
+
+    line = _format_live_training_status(row, report, warn_total=5, fail_total=2)
+
+    assert line.startswith("[train] step=3 epoch=1 batch=3 health=warn warn_total=5 fail_total=2")
+    assert "exc_active=0.250" in line
+    assert "inh_active=-" in line
+    assert "top1=0.200" in line
+    assert "top5=0.700" in line
+    assert "row_EE_cap=0.500" in line
+    assert "theta_exc=1.000" in line
+    assert "bcm_exc_signal=-0.125" in line
+    assert "W_EE_delta+=0.600" in line
+
+
+def test_health_event_summary_truncates_events() -> None:
+    report = {
+        "events": [
+            {"severity": "warn", "metric": "a", "value": 0.1, "threshold": 0.05},
+            {"severity": "warn", "metric": "b", "value": 0.2, "threshold": 0.1},
+            {"severity": "fail", "metric": "c", "value": 0.0, "threshold": 0.0},
+            {"severity": "warn", "metric": "d", "value": 1.0, "threshold": 0.9},
+        ]
+    }
+
+    line = _format_health_event_summary(report, limit=3)
+
+    assert line == "[train] events: warn a=0.100>0.050; warn b=0.200>0.100; fail c=0.000>0.000; +1 more"
+
+
+def test_training_workflow_writes_log_checkpoint_and_manifest(tmp_path) -> None:
+    cfg = _training_cfg(tmp_path)
 
     result = run_training(cfg, show_progress=False)
 
@@ -126,6 +180,38 @@ def test_training_workflow_writes_log_checkpoint_and_manifest(tmp_path) -> None:
         "arrays/training_probe_000002_weights.npy",
     ]
     assert result.summary["health_status"] in {"ok", "warn", "fail"}
+
+
+def test_training_workflow_prints_live_status_to_stderr(tmp_path, capsys) -> None:
+    cfg = _training_cfg(tmp_path)
+
+    result = run_training(cfg, show_progress=True)
+    captured = capsys.readouterr()
+
+    assert str(result.run_dir) not in captured.out
+    assert captured.err.count("[train] step=") == 2
+    assert "health=" in captured.err
+    assert "warn_total=" in captured.err
+    assert "fail_total=" in captured.err
+    assert "inh_active=-" in captured.err
+    assert "[train] events:" in captured.err
+
+
+def test_training_workflow_suppresses_live_status_without_progress(tmp_path, capsys) -> None:
+    run_training(_training_cfg(tmp_path), show_progress=False)
+    captured = capsys.readouterr()
+
+    assert "[train] step=" not in captured.err
+    assert "[train] events:" not in captured.err
+
+
+def test_training_workflow_prints_live_status_only_on_probe_steps(tmp_path, capsys) -> None:
+    run_training(_training_cfg(tmp_path, probe_every=2), show_progress=True)
+    captured = capsys.readouterr()
+
+    assert captured.err.count("[train] step=") == 1
+    assert "step=2" in captured.err
+    assert "step=1" not in captured.err
 
 
 def test_training_workflow_writes_full_inspection_figures(tmp_path) -> None:
