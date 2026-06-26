@@ -92,6 +92,8 @@
 * E/I neuron fraction `>0.1 Hz`、`>0.5 Hz`、`>1 Hz`、`>2 Hz`
 * E/I near-rate-cap fraction
 * top1/top5 activity concentration
+* trial 内 steady-state 诊断：`steady_*_final_vs_tail_abs_mean`、`steady_*_final_vs_tail_relative_mean`、`steady_*_tail_step_p95_abs_change`、`steady_*_tail_population_relative_drift`
+* `training_steady_population.png` 和 `training_steady_sampled_neurons.png`，确认训练 batch 尾段不是持续漂移或振荡
 * row-sum cap ratio 是否持续上升
 * tracked-weight relative median/max，不只看少数 max 样本
 * 全局权重变化和 BCM signal/theta 轨迹
@@ -103,8 +105,19 @@
 * E p95 不进入 `20+ Hz` 过热区
 * near-cap fraction 低
 * row cap ratio 不持续恶化
+* steady-state 指标显示 tail window 已基本稳定；若 0.2s 内尾段仍明显漂移，不能直接作为最终训练候选，应延长 `time.stop` 或标记为 `candidate_with_caveat`
 
 如果大部分神经元均值低于 `1 Hz`，即使 health 没有 fail，也标记为 `candidate_with_caveat` 或 reject。若 tracked weights 和全局 `W_EE_mean` / `W_IE_mean` 几乎不变，不能作为最终训练。
+
+训练搜索或 medium validation 建议开启：
+
+```bash
+-o inspection.enabled=true \
+-o inspection.steady_state.enabled=true \
+-o inspection.save_plots=true
+```
+
+批量 sweep 可以关闭 `inspection.steady_state.save_arrays` 和 `inspection.save_plots` 来减少文件量，但如果要判断 0.2s 是否足够，必须至少保留 steady-state CSV 指标。
 
 ### DG / frames 诊断协议
 

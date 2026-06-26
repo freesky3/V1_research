@@ -330,6 +330,13 @@ uv run v1-simulation simulate --config configs/simulate_grating.yaml `
 | `inspection.save_plots` | `false` | 是否保存训练诊断图。 |
 | `inspection.save_per_batch_arrays` | `false` | 是否保存每次 probe 的 rates 和 weights 数组。 |
 | `inspection.active_rate_threshold` | `1.0` | 统计 active fraction 时的 firing-rate 阈值。 |
+| `inspection.steady_state.enabled` | `false` | 是否在 probe batch 上额外记录 trial 内稳态诊断。 |
+| `inspection.steady_state.tail_fraction` | `1/3` | 用于稳态指标的尾段比例。 |
+| `inspection.steady_state.stability_window_fraction` | `0.25` | 保留字段；当前稳态指标主要使用 tail window。 |
+| `inspection.steady_state.sample_neuron_count` | `8` | 每个 population 抽样多少个神经元 trace。 |
+| `inspection.steady_state.batch_sample_index` | `0` | 保存 sampled neuron trace 时展示 batch 内第几个样本。 |
+| `inspection.steady_state.save_arrays` | `true` | 是否保存 population mean trace 和 sampled neuron trace `.npz`。 |
+| `inspection.steady_state.max_plotted_probes` | `12` | population mean trace 图最多展示多少个 probe step。 |
 | `inspection.health.min_active_neuron_fraction` | `0.05` | 低于该比例时记录静默告警；完全静默记为 fail。 |
 | `inspection.health.max_active_neuron_fraction` | `0.95` | 高于该比例时记录过度活跃告警；完全活跃记为 fail。 |
 | `inspection.health.max_top1_activity_fraction` | `0.35` | 单个神经元活动占比过高时记录集中度告警。 |

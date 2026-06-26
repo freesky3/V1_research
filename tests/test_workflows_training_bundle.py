@@ -19,9 +19,11 @@ from v1_research.workflows.train import (
     NaturalImageWorkflowConfig,
     TrainingHealthConfig,
     TrainingInspectionConfig,
+    TrainingSteadyStateConfig,
     TrainingWorkflowConfig,
     _format_health_event_summary,
     _format_live_training_status,
+    _trajectory_stability_stats,
     run_training,
 )
 
@@ -269,3 +271,66 @@ def test_training_workflow_writes_full_inspection_figures(tmp_path) -> None:
         "tracked_weights.png",
     ]:
         assert (result.run_dir / "figures" / name).is_file()
+
+
+def test_trajectory_stability_stats_reports_tail_drift() -> None:
+    time = np.array([0.0, 0.1, 0.2, 0.3], dtype=float)
+    stable = np.ones((4, 2, 3), dtype=float)
+    drifting = np.array([1.0, 2.0, 3.0, 4.0], dtype=float)[:, np.newaxis, np.newaxis]
+
+    stable_stats = _trajectory_stability_stats("steady_exc", stable, time, TrainingSteadyStateConfig(tail_fraction=0.5))
+    drifting_stats = _trajectory_stability_stats("steady_exc", drifting, time, TrainingSteadyStateConfig(tail_fraction=0.5))
+
+    assert stable_stats["steady_exc_final_vs_tail_abs_mean"] == 0.0
+    assert stable_stats["steady_exc_tail_step_p95_abs_change"] == 0.0
+    assert drifting_stats["steady_exc_final_vs_tail_abs_mean"] > 0.0
+    assert drifting_stats["steady_exc_tail_step_p95_abs_change"] > 0.0
+    assert drifting_stats["steady_exc_tail_population_relative_drift"] > 0.0
+
+
+def test_training_workflow_writes_steady_state_diagnostics_arrays_and_figures(tmp_path) -> None:
+    cfg = _training_cfg(tmp_path)
+    cfg = TrainingWorkflowConfig(
+        run_root=cfg.run_root,
+        empirical_data_path=cfg.empirical_data_path,
+        model=cfg.model,
+        natural_images=cfg.natural_images,
+        solver=SolverConfig(backend="scipy", scipy_method="RK4", store_trajectory=False),
+        learning=cfg.learning,
+        background=cfg.background,
+        time=np.array([0.0, 0.01, 0.02, 0.03], dtype=float),
+        batch_size=cfg.batch_size,
+        epochs=cfg.epochs,
+        inspection=TrainingInspectionConfig(
+            enabled=True,
+            health=cfg.inspection.health,
+            tracked_weight_count=0,
+            save_plots=True,
+            save_per_batch_arrays=False,
+            steady_state=TrainingSteadyStateConfig(enabled=True, sample_neuron_count=1),
+        ),
+    )
+
+    result = run_training(cfg, show_progress=False)
+
+    with (result.run_dir / "tables" / "training_diagnostics.csv").open(encoding="utf-8", newline="") as handle:
+        diagnostic_rows = list(csv.DictReader(handle))
+    assert "steady_exc_final_vs_tail_abs_mean" in diagnostic_rows[0]
+    assert "steady_exc_tail_step_p95_abs_change" in diagnostic_rows[0]
+    population_path = result.run_dir / "arrays" / "training_probe_000001_population_trace.npz"
+    sampled_path = result.run_dir / "arrays" / "training_probe_000001_sampled_neuron_traces.npz"
+    assert population_path.is_file()
+    assert sampled_path.is_file()
+    with np.load(population_path) as data:
+        assert data["time"].shape == (4,)
+        assert data["exc_population_mean"].shape == (4,)
+    with np.load(sampled_path) as data:
+        assert data["exc_traces"].shape == (4, 1)
+        assert data["inh_traces"].shape == (4, 0)
+    assert (result.run_dir / "figures" / "training_steady_population.png").is_file()
+    assert (result.run_dir / "figures" / "training_steady_sampled_neurons.png").is_file()
+
+    manifest = json.loads((result.run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert "training_steady_state_arrays" in manifest["outputs"]
+    assert manifest["outputs"]["training_steady_population"] == "figures/training_steady_population.png"
+    assert "final_steady_exc_final_vs_tail_abs_mean" in manifest["summary"]

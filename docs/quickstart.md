@@ -386,6 +386,7 @@ uv run v1-simulation train --config configs/train_smoke.yaml `
   -o inspection.enabled=true `
   -o inspection.probe_every=1 `
   -o inspection.tracked_weight_count=20 `
+  -o inspection.steady_state.enabled=true `
   -o inspection.save_plots=true
 ```
 
@@ -396,6 +397,7 @@ uv run v1-simulation train --config configs/train_smoke.yaml `
 - `inspection.tracked_weight_count`：随机抽样跟踪多少条 plastic connection。
 - `inspection.save_plots`：是否保存 `figures/training_overview.png` 和 tracked weights 图。
 - `inspection.save_per_batch_arrays`：是否保存每次 probe 的 rates/weights 数组；批量实验中建议保持 `false`。
+- `inspection.steady_state.enabled`：在 probe batch 上保留 trial 内 trajectory，写入 `steady_*` CSV 指标，并可生成 `training_steady_population.png` 和 `training_steady_sampled_neurons.png`。
 - `inspection.health.*`：训练健康报告阈值；默认偏早提醒，可用 `-o inspection.health.min_active_neuron_fraction=0.1` 等方式覆盖。
 
 ### 4.6 分析参数

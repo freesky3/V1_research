@@ -29,6 +29,7 @@ TrainingInspectionConfig(
     save_plots=False,
     save_per_batch_arrays=False,
     active_rate_threshold=1.0,
+    steady_state=TrainingSteadyStateConfig(enabled=False),
 )
 ```
 
@@ -77,6 +78,10 @@ run_training(...)
    -> row_sum_pressure(...)
    -> extended_plastic_weight_stats(...)
    -> bcm_signal_stats(...)
+-> if inspection.steady_state.enabled:
+   -> keep full E/I trajectory for this probe
+   -> compute tail stability metrics
+   -> optionally save population and sampled-neuron traces
 -> if show_progress:
    -> evaluate_training_health([current_row], ...)
    -> print live status to stderr
@@ -92,6 +97,8 @@ run_training(...)
 - `W_EE`: `(n_exc, n_exc)`，BCM 管理的 `E <- E` plastic block。
 - `W_IE`: `(n_inh, n_exc)`，BCM 管理的 `I <- E` plastic block。
 - `theta_exc`: `(n_exc,)`，`theta_inh`: `(n_inh,)`。
+- `RateResult.exc_trajectory`: `(n_time, n_batch, n_exc)`，只在 `inspection.steady_state.enabled=true` 的 probe batch 上强制保留用于诊断。
+- `RateResult.inh_trajectory`: `(n_time, n_batch, n_inh)`。
 
 空 population 的扩展诊断字段使用 `None`，并且健康判定会跳过这些字段。这样 `inhibitory_fraction=0.0` 的 smoke 配置不会因为不存在 inhibitory population 而误报。
 
@@ -109,8 +116,30 @@ run_training(...)
 - row-sum cap 压力：`row_sum_EE_cap_fraction`、`row_sum_EE_cap_max_ratio`、`row_sum_IE_cap_fraction`、`row_sum_IE_cap_max_ratio`。
 - BCM theta：`theta_exc_mean`、`theta_exc_median`、`theta_exc_p05`、`theta_exc_p95`，以及 `theta_inh_*`。
 - BCM signal：`bcm_exc_above_theta_fraction`、`bcm_exc_signal_mean`、`bcm_exc_signal_abs_mean`，以及 `bcm_inh_*`。
+- trial 内稳态：`steady_exc_tail_mean`、`steady_exc_tail_variance`、`steady_exc_final_vs_tail_abs_mean`、`steady_exc_final_vs_tail_relative_mean`、`steady_exc_tail_step_p95_abs_change`、`steady_exc_tail_population_relative_drift`，以及 `steady_inh_*`。这些字段只有 `inspection.steady_state.enabled=true` 时出现，用于判断固定模拟时长末尾是否仍在漂移。
 
 旧的 `active_rate_stats(...)`、`plastic_weight_stats(...)`、`theta_stats(...)` 仍保留，用于兼容已有轻量诊断；扩展函数会补充更适合训练机制解释的字段。
+
+## 训练 steady-state 诊断
+
+`inspection.steady_state.enabled=true` 时，训练不会改变求解时长或学习规则，只会在 inspected batch 上临时要求 solver 保留完整 trajectory。这个诊断适合回答“当前 `time[-1]` 是否足够接近稳态”，不是 early stop。
+
+主要读数：
+
+- `final_vs_tail_abs_mean`：最后一个时间点与 tail window 均值的平均绝对差。越小表示结尾越接近当前训练用于学习的 tail mean。
+- `final_vs_tail_relative_mean`：上述差值除以 tail mean 的相对量。低 firing rate 时这个值会被小分母放大，需要结合绝对差一起看。
+- `tail_step_p95_abs_change`：tail window 内相邻时间点变化的 95 分位。持续偏大通常说明还在漂移或振荡。
+- `tail_population_relative_drift`：tail window 中 population mean 的线性漂移量除以 tail mean。接近 0 更像稳定尾段。
+
+数组产物：
+
+- `training_probe_XXXXXX_population_trace.npz`：包含 `time`、`exc_population_mean`、`inh_population_mean`。
+- `training_probe_XXXXXX_sampled_neuron_traces.npz`：包含抽样神经元 index 和 trace。默认每个 population 一半取 tail mean 最高神经元，一半随机抽取剩余神经元。
+
+图片产物：
+
+- `training_steady_population.png`：多个 probe 的 E/I population mean firing-rate trace。
+- `training_steady_sampled_neurons.png`：最后一个 probe 中抽样神经元的 trial 内 trace。
 
 ## 训练中的实时状态
 
@@ -224,6 +253,8 @@ runs/train/<timestamp>/
     training_probe_000001_exc_rates.npy
     training_probe_000001_inh_rates.npy
     training_probe_000001_weights.npy
+    training_probe_000001_population_trace.npz      # steady_state.enabled=true 且 save_arrays=true
+    training_probe_000001_sampled_neuron_traces.npz # steady_state.enabled=true 且 save_arrays=true
     ...
   figures/
     training_overview.png           # save_plots=True
@@ -231,6 +262,8 @@ runs/train/<timestamp>/
     training_bcm.png                # save_plots=True
     training_plasticity.png         # save_plots=True
     training_row_sums.png           # save_plots=True
+    training_steady_population.png  # steady_state.enabled=True 且 save_plots=True
+    training_steady_sampled_neurons.png
     tracked_weights.png             # save_plots=True 且有 tracked rows
 ```
 

@@ -29,6 +29,8 @@ def test_cli_loads_config_applies_override_and_dispatches_train(tmp_path, monkey
         captured["batch_size"] = cfg.batch_size
         captured["l4_n_side"] = cfg.model.l4.n_side
         captured["min_active"] = cfg.inspection.health.min_active_neuron_fraction
+        captured["steady"] = cfg.inspection.steady_state.enabled
+        captured["steady_count"] = cfg.inspection.steady_state.sample_neuron_count
         captured["show_progress"] = show_progress
 
         class Result:
@@ -49,11 +51,22 @@ def test_cli_loads_config_applies_override_and_dispatches_train(tmp_path, monkey
             "-o",
             "inspection.health.min_active_neuron_fraction=0.2",
             "--no-progress",
+            "-o",
+            "inspection.steady_state.enabled=true",
+            "-o",
+            "inspection.steady_state.sample_neuron_count=3",
         ],
     )
 
     assert result.exit_code == 0, result.output
-    assert captured == {"batch_size": 3, "l4_n_side": 1, "min_active": 0.2, "show_progress": False}
+    assert captured == {
+        "batch_size": 3,
+        "l4_n_side": 1,
+        "min_active": 0.2,
+        "steady": True,
+        "steady_count": 3,
+        "show_progress": False,
+    }
     assert str(tmp_path / "runs" / "train" / "demo") in result.output
 
 

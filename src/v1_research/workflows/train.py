@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -78,6 +78,19 @@ class NaturalImageWorkflowConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TrainingSteadyStateConfig:
+    """Optional within-trial steady-state diagnostics for training probes."""
+
+    enabled: bool = False
+    tail_fraction: float = 1.0 / 3.0
+    stability_window_fraction: float = 0.25
+    sample_neuron_count: int = 8
+    batch_sample_index: int = 0
+    save_arrays: bool = True
+    max_plotted_probes: int = 12
+
+
+@dataclass(frozen=True, slots=True)
 class TrainingInspectionConfig:
     """Optional intermediate diagnostics for training runs."""
 
@@ -88,6 +101,7 @@ class TrainingInspectionConfig:
     save_plots: bool = False
     save_per_batch_arrays: bool = False
     active_rate_threshold: float = 1.0
+    steady_state: TrainingSteadyStateConfig = field(default_factory=TrainingSteadyStateConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +132,29 @@ class TrainingRun:
     summary: dict[str, Any]
     log_path: Path
     model_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class BatchRateSolve:
+    """Rate batch plus optional trajectory-bearing solver result."""
+
+    rates: RateBatch
+    result: RateResult
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingSteadyStateProbe:
+    """Compact within-trial traces captured for one training probe."""
+
+    step: int
+    time: NDArray[np.float64]
+    batch_sample_index: int
+    exc_population_mean: NDArray[np.float64]
+    inh_population_mean: NDArray[np.float64]
+    exc_sample_indices: NDArray[np.int64]
+    inh_sample_indices: NDArray[np.int64]
+    exc_sample_traces: NDArray[np.float64]
+    inh_sample_traces: NDArray[np.float64]
 
 
 def apply_learning_rule(
@@ -169,6 +206,27 @@ def _solve_batch_rates(
     background_trace: BackgroundTrace | None = None,
     solver: SolverCallable | None = None,
 ) -> RateBatch:
+    return _solve_batch_rate_result(
+        model,
+        drive=drive,
+        time=time,
+        n_batch=n_batch,
+        solver_cfg=solver_cfg,
+        background_trace=background_trace,
+        solver=solver,
+    ).rates
+
+
+def _solve_batch_rate_result(
+    model: ModelState,
+    *,
+    drive: ExternalDrive,
+    time: Sequence[float] | np.ndarray,
+    n_batch: int,
+    solver_cfg: SolverConfig,
+    background_trace: BackgroundTrace | None = None,
+    solver: SolverCallable | None = None,
+) -> BatchRateSolve:
     solver_fn = solve_rates if solver is None else solver
     time_values = np.asarray(time, dtype=float)
     result = solver_fn(
@@ -182,7 +240,10 @@ def _solve_batch_rates(
     external = np.asarray(drive(float(time_values[0])), dtype=float)
     if external.ndim == 1:
         external = external[:, np.newaxis]
-    return RateBatch(exc=result.exc, inh=result.inh, external=external.T)
+    return BatchRateSolve(
+        rates=RateBatch(exc=result.exc, inh=result.inh, external=external.T),
+        result=result,
+    )
 
 
 def run_training(cfg: TrainingWorkflowConfig, *, show_progress: bool = True) -> TrainingRun:
@@ -205,6 +266,8 @@ def run_training(cfg: TrainingWorkflowConfig, *, show_progress: bool = True) -> 
     diagnostic_rows: list[dict[str, object]] = []
     tracked_rows: list[dict[str, object]] = []
     per_batch_arrays: list[Path] = []
+    steady_state_arrays: list[Path] = []
+    steady_state_probes: list[TrainingSteadyStateProbe] = []
     live_warning_count = 0
     live_failure_count = 0
     for epoch in range(1, int(cfg.epochs) + 1):
@@ -226,14 +289,19 @@ def run_training(cfg: TrainingWorkflowConfig, *, show_progress: bool = True) -> 
                 time=time,
             )
             batch_drive = drive.make_static_batch_func(batch)
-            rates = _solve_batch_rates(
+            next_step = batches + 1
+            inspect_this_step = _should_inspect(cfg.inspection, next_step)
+            steady_this_step = _should_collect_steady_state(cfg.inspection, next_step)
+            solver_cfg = _trajectory_solver_config(cfg.solver) if steady_this_step else cfg.solver
+            solved = _solve_batch_rate_result(
                 model,
                 drive=batch_drive,
                 time=time,
                 n_batch=len(batch),
-                solver_cfg=cfg.solver,
+                solver_cfg=solver_cfg,
                 background_trace=background,
             )
+            rates = solved.rates
             previous_model = model
             update = apply_learning_rule(model, rates, rule, state=state)
             model = update.model
@@ -249,7 +317,7 @@ def run_training(cfg: TrainingWorkflowConfig, *, show_progress: bool = True) -> 
                     stats=rule.stats(model, state),
                 )
             )
-            if _should_inspect(cfg.inspection, batches):
+            if inspect_this_step:
                 if not tracked and int(cfg.inspection.tracked_weight_count) > 0:
                     tracked = sample_tracked_weights(previous_model, count=int(cfg.inspection.tracked_weight_count))
                 diagnostic_row = _training_diagnostic_row(
@@ -264,6 +332,8 @@ def run_training(cfg: TrainingWorkflowConfig, *, show_progress: bool = True) -> 
                     near_rate_cap=_near_rate_cap(cfg.solver, cfg.inspection.health),
                     bcm_cfg=cfg.learning.bcm,
                 )
+                if steady_this_step:
+                    diagnostic_row.update(_training_steady_state_row(solved.result, cfg.inspection.steady_state))
                 diagnostic_rows.append(diagnostic_row)
                 if show_progress:
                     current_health = evaluate_training_health([diagnostic_row], cfg.inspection.health)
@@ -283,6 +353,21 @@ def run_training(cfg: TrainingWorkflowConfig, *, show_progress: bool = True) -> 
                         print(event_summary, file=sys.stderr)
                 if cfg.inspection.save_per_batch_arrays:
                     per_batch_arrays.extend(_save_training_probe_arrays(run_dir, batches, rates, model))
+                if steady_this_step and (cfg.inspection.steady_state.save_arrays or cfg.inspection.save_plots):
+                    steady_probe = _training_steady_state_probe(
+                        batches,
+                        solved.result,
+                        cfg.inspection.steady_state,
+                    )
+                    if cfg.inspection.save_plots:
+                        steady_state_probes.append(steady_probe)
+                    if cfg.inspection.steady_state.save_arrays:
+                        steady_state_arrays.extend(
+                            _save_training_steady_state_arrays(
+                                run_dir,
+                                steady_probe,
+                            )
+                        )
                 tracked_rows.extend(record_tracked_weights(model, tracked, step=batches))
 
     log_path = write_csv_rows(run_dir / "tables" / "training_log.csv", log_rows)
@@ -304,7 +389,14 @@ def run_training(cfg: TrainingWorkflowConfig, *, show_progress: bool = True) -> 
         if tracked_rows:
             tracked_path = write_csv_rows(run_dir / "tables" / "tracked_weights.csv", tracked_rows)
         if cfg.inspection.save_plots:
-            figure_paths = _save_training_figures(run_dir, diagnostic_rows, tracked_rows, health_report=health_report)
+            figure_paths = _save_training_figures(
+                run_dir,
+                diagnostic_rows,
+                tracked_rows,
+                steady_state_probes=steady_state_probes,
+                steady_cfg=cfg.inspection.steady_state,
+                health_report=health_report,
+            )
     model_path = save_model_state(run_dir / "model", model, metadata={"batches": batches, "samples_seen": samples_seen})
     summary: dict[str, Any] = {
         "epochs": int(cfg.epochs),
@@ -328,6 +420,8 @@ def run_training(cfg: TrainingWorkflowConfig, *, show_progress: bool = True) -> 
         outputs["tracked_weights"] = relative_output_path(tracked_path, run_dir)
     if per_batch_arrays:
         outputs["training_probe_arrays"] = [relative_output_path(path, run_dir) for path in per_batch_arrays]
+    if steady_state_arrays:
+        outputs["training_steady_state_arrays"] = [relative_output_path(path, run_dir) for path in steady_state_arrays]
     for name, path in figure_paths.items():
         outputs[name] = relative_output_path(path, run_dir)
     write_manifest(
@@ -393,6 +487,16 @@ def _should_inspect(cfg: TrainingInspectionConfig, step: int) -> bool:
     return bool(cfg.enabled) and int(cfg.probe_every) > 0 and step % int(cfg.probe_every) == 0
 
 
+def _should_collect_steady_state(cfg: TrainingInspectionConfig, step: int) -> bool:
+    return _should_inspect(cfg, step) and bool(cfg.steady_state.enabled)
+
+
+def _trajectory_solver_config(cfg: SolverConfig) -> SolverConfig:
+    if bool(cfg.store_trajectory):
+        return cfg
+    return replace(cfg, store_trajectory=True)
+
+
 def _training_diagnostic_row(
     *,
     epoch: int,
@@ -434,6 +538,8 @@ def _save_training_figures(
     diagnostics: list[dict[str, object]],
     tracked: list[dict[str, object]],
     *,
+    steady_state_probes: list[TrainingSteadyStateProbe] | None = None,
+    steady_cfg: TrainingSteadyStateConfig = TrainingSteadyStateConfig(),
     health_report: dict[str, object] | None = None,
 ) -> dict[str, Path]:
     if not diagnostics:
@@ -551,6 +657,36 @@ def _save_training_figures(
         fig.savefig(tracked_path)
         plt.close(fig)
         paths["tracked_weights_figure"] = tracked_path
+
+    probes = list(steady_state_probes or [])
+    if probes:
+        steady_population = figure_dir / "training_steady_population.png"
+        fig, axes = plt.subplots(2, 1, figsize=(9.0, 6.0), dpi=140)
+        _plot_steady_population_traces(
+            axes[0],
+            probes,
+            population="exc",
+            max_plotted=int(steady_cfg.max_plotted_probes),
+        )
+        _plot_steady_population_traces(
+            axes[1],
+            probes,
+            population="inh",
+            max_plotted=int(steady_cfg.max_plotted_probes),
+        )
+        fig.tight_layout()
+        fig.savefig(steady_population)
+        plt.close(fig)
+        paths["training_steady_population"] = steady_population
+
+        steady_neurons = figure_dir / "training_steady_sampled_neurons.png"
+        fig, axes = plt.subplots(2, 1, figsize=(9.0, 6.0), dpi=140)
+        _plot_sampled_neuron_traces(axes[0], probes[-1], population="exc")
+        _plot_sampled_neuron_traces(axes[1], probes[-1], population="inh")
+        fig.tight_layout()
+        fig.savefig(steady_neurons)
+        plt.close(fig)
+        paths["training_steady_sampled_neurons"] = steady_neurons
     return paths
 
 
@@ -582,6 +718,110 @@ def _extended_model_plastic_stats(
     }
 
 
+def _training_steady_state_row(result: RateResult, cfg: TrainingSteadyStateConfig) -> dict[str, object]:
+    row: dict[str, object] = {}
+    row.update(_trajectory_stability_stats("steady_exc", result.exc_trajectory, result.time, cfg))
+    row.update(_trajectory_stability_stats("steady_inh", result.inh_trajectory, result.time, cfg))
+    return row
+
+
+def _trajectory_stability_stats(
+    prefix: str,
+    trajectory: NDArray[np.float64] | None,
+    time: NDArray[np.float64],
+    cfg: TrainingSteadyStateConfig,
+) -> dict[str, object]:
+    if trajectory is None:
+        return _empty_trajectory_stability_stats(prefix)
+    arr = np.asarray(trajectory, dtype=float)
+    if arr.ndim != 3:
+        raise ValueError(f"{prefix} trajectory must have shape (n_time, n_batch, n_units).")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{prefix} trajectory contains NaN or infinite values.")
+    if arr.size == 0 or arr.shape[0] == 0 or arr.shape[2] == 0:
+        return _empty_trajectory_stability_stats(prefix)
+    time_arr = validate_time_grid(np.asarray(time, dtype=float), copy=True)
+    if time_arr.size != arr.shape[0]:
+        raise ValueError(f"{prefix} trajectory time dimension does not match time.")
+
+    tail_start = _tail_start_index(arr.shape[0], cfg.tail_fraction)
+    tail = arr[tail_start:]
+    tail_mean_by_batch_unit = np.mean(tail, axis=0)
+    final = arr[-1]
+    final_delta = np.abs(final - tail_mean_by_batch_unit)
+    denominator = np.maximum(np.abs(tail_mean_by_batch_unit), 1.0e-12)
+    relative_delta = final_delta / denominator
+    population_mean = np.mean(arr, axis=(1, 2))
+    tail_population_mean = population_mean[tail_start:]
+    if tail_population_mean.size >= 2:
+        slope = _linear_slope(time_arr[tail_start:], tail_population_mean)
+        tail_duration = float(time_arr[-1] - time_arr[tail_start])
+        population_relative_drift = (slope * tail_duration) / max(abs(float(np.mean(tail_population_mean))), 1.0e-12)
+    else:
+        slope = None
+        population_relative_drift = None
+    if tail.shape[0] >= 2:
+        step = np.abs(np.diff(tail, axis=0))
+        step_mean = float(np.mean(step))
+        step_p95 = float(np.percentile(step, 95))
+        step_max = float(np.max(step))
+    else:
+        step_mean = None
+        step_p95 = None
+        step_max = None
+
+    return {
+        f"{prefix}_tail_start_index": int(tail_start),
+        f"{prefix}_tail_mean": float(np.mean(tail)),
+        f"{prefix}_tail_variance": float(np.var(tail)),
+        f"{prefix}_final_vs_tail_abs_mean": float(np.mean(final_delta)),
+        f"{prefix}_final_vs_tail_abs_p95": float(np.percentile(final_delta, 95)),
+        f"{prefix}_final_vs_tail_relative_mean": float(np.mean(relative_delta)),
+        f"{prefix}_final_vs_tail_relative_p95": float(np.percentile(relative_delta, 95)),
+        f"{prefix}_tail_step_mean_abs_change": step_mean,
+        f"{prefix}_tail_step_p95_abs_change": step_p95,
+        f"{prefix}_tail_step_max_abs_change": step_max,
+        f"{prefix}_tail_population_mean_slope": slope,
+        f"{prefix}_tail_population_relative_drift": population_relative_drift,
+    }
+
+
+def _empty_trajectory_stability_stats(prefix: str) -> dict[str, object]:
+    return {
+        f"{prefix}_tail_start_index": None,
+        f"{prefix}_tail_mean": None,
+        f"{prefix}_tail_variance": None,
+        f"{prefix}_final_vs_tail_abs_mean": None,
+        f"{prefix}_final_vs_tail_abs_p95": None,
+        f"{prefix}_final_vs_tail_relative_mean": None,
+        f"{prefix}_final_vs_tail_relative_p95": None,
+        f"{prefix}_tail_step_mean_abs_change": None,
+        f"{prefix}_tail_step_p95_abs_change": None,
+        f"{prefix}_tail_step_max_abs_change": None,
+        f"{prefix}_tail_population_mean_slope": None,
+        f"{prefix}_tail_population_relative_drift": None,
+    }
+
+
+def _tail_start_index(n_time: int, fraction: float) -> int:
+    if int(n_time) <= 1:
+        return 0
+    bounded = min(1.0, max(0.0, float(fraction)))
+    tail_count = max(1, int(np.ceil(int(n_time) * bounded)))
+    return max(0, int(n_time) - tail_count)
+
+
+def _linear_slope(time: NDArray[np.float64], values: NDArray[np.float64]) -> float:
+    if time.size != values.size:
+        raise ValueError("time and values must have the same length.")
+    centered_time = time - float(np.mean(time))
+    denom = float(np.sum(centered_time**2))
+    if denom <= 0.0:
+        return 0.0
+    centered_values = values - float(np.mean(values))
+    return float(np.sum(centered_time * centered_values) / denom)
+
+
 def _near_rate_cap(solver_cfg: SolverConfig, health_cfg: TrainingHealthConfig) -> float | None:
     rate_max = solver_cfg.transfer.rate_max
     if rate_max is None:
@@ -604,6 +844,14 @@ def _training_health_summary(report: dict[str, object]) -> dict[str, object]:
             "inh_active_neuron_fraction",
             "exc_top1_activity_fraction",
             "exc_top5_activity_fraction",
+            "steady_exc_final_vs_tail_abs_mean",
+            "steady_inh_final_vs_tail_abs_mean",
+            "steady_exc_final_vs_tail_relative_mean",
+            "steady_inh_final_vs_tail_relative_mean",
+            "steady_exc_tail_step_p95_abs_change",
+            "steady_inh_tail_step_p95_abs_change",
+            "steady_exc_tail_population_relative_drift",
+            "steady_inh_tail_population_relative_drift",
         ):
             if key in final_metrics:
                 summary[f"final_{key}"] = final_metrics[key]
@@ -701,6 +949,48 @@ def _plot_series(ax, steps: list[int], rows: list[dict[str, object]], names: lis
     return plotted
 
 
+def _plot_steady_population_traces(
+    ax,
+    probes: list[TrainingSteadyStateProbe],
+    *,
+    population: str,
+    max_plotted: int,
+) -> None:
+    shown = probes[-max(1, int(max_plotted)) :]
+    plotted = False
+    for probe in shown:
+        values = probe.exc_population_mean if population == "exc" else probe.inh_population_mean
+        if values.size == 0:
+            continue
+        ax.plot(probe.time, values, alpha=0.7, label=f"step {probe.step}")
+        plotted = True
+    if plotted:
+        ax.legend()
+    else:
+        ax.text(0.5, 0.5, "no data", transform=ax.transAxes, ha="center", va="center")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Mean rate")
+    ax.set_title(f"{population.upper()} population mean")
+
+
+def _plot_sampled_neuron_traces(ax, probe: TrainingSteadyStateProbe, *, population: str) -> None:
+    if population == "exc":
+        traces = probe.exc_sample_traces
+        indices = probe.exc_sample_indices
+    else:
+        traces = probe.inh_sample_traces
+        indices = probe.inh_sample_indices
+    if traces.size == 0 or traces.shape[1] == 0:
+        ax.text(0.5, 0.5, "no data", transform=ax.transAxes, ha="center", va="center")
+    else:
+        for col, index in enumerate(indices):
+            ax.plot(probe.time, traces[:, col], alpha=0.75, label=str(int(index)))
+        ax.legend(title="cell")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Rate")
+    ax.set_title(f"{population.upper()} sampled neurons, step {probe.step}, batch item {probe.batch_sample_index}")
+
+
 def _numeric_value(value: object) -> float | None:
     if value is None or value == "":
         return None
@@ -736,3 +1026,119 @@ def _save_training_probe_arrays(
     weights = model.weights.toarray() if sparse.issparse(model.weights) else np.asarray(model.weights, dtype=float)
     np.save(paths[2], weights)
     return paths
+
+
+def _training_steady_state_probe(
+    step: int,
+    result: RateResult,
+    cfg: TrainingSteadyStateConfig,
+) -> TrainingSteadyStateProbe:
+    time = validate_time_grid(np.asarray(result.time, dtype=float), copy=True)
+    exc = _trajectory_or_empty(result.exc_trajectory, n_time=time.size)
+    inh = _trajectory_or_empty(result.inh_trajectory, n_time=time.size)
+    n_batch = max(_trajectory_batch_size(exc), _trajectory_batch_size(inh), 1)
+    batch_index = min(max(0, int(cfg.batch_sample_index)), n_batch - 1)
+    exc_population = _population_mean_by_time(exc)
+    inh_population = _population_mean_by_time(inh)
+    exc_indices = _sample_trace_neurons(exc, count=int(cfg.sample_neuron_count), tail_fraction=float(cfg.tail_fraction))
+    inh_indices = _sample_trace_neurons(inh, count=int(cfg.sample_neuron_count), tail_fraction=float(cfg.tail_fraction))
+    return TrainingSteadyStateProbe(
+        step=int(step),
+        time=time,
+        batch_sample_index=batch_index,
+        exc_population_mean=exc_population,
+        inh_population_mean=inh_population,
+        exc_sample_indices=exc_indices,
+        inh_sample_indices=inh_indices,
+        exc_sample_traces=_sample_traces_for_batch(exc, batch_index=batch_index, indices=exc_indices),
+        inh_sample_traces=_sample_traces_for_batch(inh, batch_index=batch_index, indices=inh_indices),
+    )
+
+
+def _save_training_steady_state_arrays(
+    run_dir: Path,
+    probe: TrainingSteadyStateProbe,
+) -> list[Path]:
+    arrays = run_dir / "arrays"
+    arrays.mkdir(parents=True, exist_ok=True)
+    stem = f"training_probe_{int(probe.step):06d}"
+    population_path = arrays / f"{stem}_population_trace.npz"
+    sampled_path = arrays / f"{stem}_sampled_neuron_traces.npz"
+    np.savez_compressed(
+        population_path,
+        time=probe.time,
+        step=np.array(probe.step, dtype=np.int64),
+        batch_sample_index=np.array(probe.batch_sample_index, dtype=np.int64),
+        exc_population_mean=probe.exc_population_mean,
+        inh_population_mean=probe.inh_population_mean,
+    )
+    np.savez_compressed(
+        sampled_path,
+        time=probe.time,
+        step=np.array(probe.step, dtype=np.int64),
+        batch_sample_index=np.array(probe.batch_sample_index, dtype=np.int64),
+        exc_indices=probe.exc_sample_indices,
+        inh_indices=probe.inh_sample_indices,
+        exc_traces=probe.exc_sample_traces,
+        inh_traces=probe.inh_sample_traces,
+    )
+    return [population_path, sampled_path]
+
+
+def _trajectory_or_empty(trajectory: NDArray[np.float64] | None, *, n_time: int) -> NDArray[np.float64]:
+    if trajectory is None:
+        return np.empty((int(n_time), 0, 0), dtype=float)
+    arr = np.asarray(trajectory, dtype=float)
+    if arr.ndim != 3:
+        raise ValueError("training steady-state trajectory must have shape (n_time, n_batch, n_units).")
+    if arr.shape[0] != int(n_time):
+        raise ValueError("training steady-state trajectory time dimension does not match time.")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("training steady-state trajectory contains NaN or infinite values.")
+    return arr
+
+
+def _trajectory_batch_size(trajectory: NDArray[np.float64]) -> int:
+    return int(trajectory.shape[1]) if trajectory.ndim == 3 and trajectory.shape[1] > 0 else 0
+
+
+def _population_mean_by_time(trajectory: NDArray[np.float64]) -> NDArray[np.float64]:
+    if trajectory.size == 0 or trajectory.shape[1] == 0 or trajectory.shape[2] == 0:
+        return np.empty((0,), dtype=float)
+    return np.mean(trajectory, axis=(1, 2))
+
+
+def _sample_trace_neurons(
+    trajectory: NDArray[np.float64],
+    *,
+    count: int,
+    tail_fraction: float,
+) -> NDArray[np.int64]:
+    if int(count) <= 0 or trajectory.size == 0 or trajectory.shape[2] == 0:
+        return np.empty((0,), dtype=np.int64)
+    n_units = int(trajectory.shape[2])
+    sample_count = min(int(count), n_units)
+    tail_start = _tail_start_index(trajectory.shape[0], tail_fraction)
+    tail_mean = np.mean(trajectory[tail_start:], axis=(0, 1))
+    active_count = min(sample_count, int(np.ceil(sample_count / 2)))
+    active = np.argsort(tail_mean)[::-1][:active_count]
+    remaining = np.setdiff1d(np.arange(n_units, dtype=np.int64), active.astype(np.int64), assume_unique=False)
+    random_count = sample_count - int(active.size)
+    if random_count > 0 and remaining.size > 0:
+        random = np.random.choice(remaining, size=min(random_count, remaining.size), replace=False)
+        chosen = np.concatenate([active.astype(np.int64), np.asarray(random, dtype=np.int64)])
+    else:
+        chosen = active.astype(np.int64)
+    return np.asarray(chosen, dtype=np.int64)
+
+
+def _sample_traces_for_batch(
+    trajectory: NDArray[np.float64],
+    *,
+    batch_index: int,
+    indices: NDArray[np.int64],
+) -> NDArray[np.float64]:
+    if trajectory.size == 0 or indices.size == 0 or trajectory.shape[1] == 0:
+        return np.empty((trajectory.shape[0], 0), dtype=float)
+    safe_batch = min(max(0, int(batch_index)), trajectory.shape[1] - 1)
+    return np.asarray(trajectory[:, safe_batch, indices], dtype=float)
