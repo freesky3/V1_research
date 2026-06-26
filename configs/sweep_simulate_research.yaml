@@ -1,0 +1,43 @@
+workflow: simulate
+seed: 45
+run_root: runs
+base:
+  run_root: runs
+  empirical_data_path: data/sample_data.pkl
+  model:
+    p_ee: 0.16
+    weight:
+      scales:
+        ee: 0.95
+        ei: 1.08
+  solver:
+    backend: jax-rk4
+    store_trajectory: false
+    transfer:
+      rate_max: 80.0
+  grating:
+    baseline_rate: 0.0
+    visual_gain: 315.0
+    n_orientations: 8
+    visual_gain_ramp_duration: 0.1
+  trials:
+    repeats_per_direction: 8
+    shuffle: true
+    random_phase: true
+    phase_jitter: 0.35
+  time:
+    start: 0.0
+    stop: 0.8
+    step: 0.004
+  background:
+    enabled: true
+    exc:
+      mean: 0.0
+      stationary_std: 0.02
+      tau: 0.05
+    inh:
+      mean: 0.0
+      stationary_std: 0.03
+      tau: 0.05
+parameters:
+  grating.visual_gain: [300.0, 315.0]

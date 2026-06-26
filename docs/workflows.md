@@ -90,6 +90,8 @@ result = run_grating_simulation(SimulationWorkflowConfig(model_checkpoint="runs/
 
 `SimulationWorkflowConfig` 位于 `workflows/simulate.py`，组合 `ModelConfig`、`SolverConfig`、`DriftingGratingConfig`、`BackgroundConfig`、time grid、可选 `model_checkpoint` 和 `SimulationInspectionConfig`。单次 `simulate` 默认 `inspection.enabled=True`、`inspection.save_plots=True`，用于把一次仿真直接变成健康检查入口；如果要只保存轻量 rate 数组，可以显式关闭 `inspection.enabled` 并把 `solver.store_trajectory=false`。
 
+研究 DG 诊断建议使用较长 trial 和足够 repeats，例如 `time: {start: 0.0, stop: 0.8, step: 0.004}`、`trials.repeats_per_direction=8`。若 `simulate_traces.png` 被 onset transient 主导，可设置 `grating.visual_gain_ramp_duration=0.1`，在前 100 ms 平滑打开 L4 drive，避免把硬切入尖峰误判为稳态响应。
+
 数据流：
 
 ```text

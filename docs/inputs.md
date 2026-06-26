@@ -74,6 +74,8 @@ orientation theta
 
 每个 orientation 只做一次 RF/grid 空间积分。之后任意时间点只代入 `temporal_frequency * t`，避免在 solver 循环里反复生成 frame 和投影。
 
+`visual_gain_ramp_duration > 0` 时，L4 drive 末端的 `visual_gain` 会乘一个 smoothstep 时间包络：`t<=0` 为 0，`t>=duration` 为 1，中间使用 `s*s*(3-2*s)`。这用于减轻 drifting-grating 在 `t=0` 硬切入造成的共同 transient；`stimulus_frame(...)` 仍渲染完整 grating frame，不应用该 gain ramp。
+
 重要 shape：
 
 - `external_drive(theta, t)` 返回 `(n_input,)`。

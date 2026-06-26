@@ -48,3 +48,40 @@ def test_drifting_grating_single_and_batched_drive() -> None:
     assert frame.shape == (4, 5, 5)
     assert np.min(frame) >= 0.19
     assert np.max(frame) <= 1.81
+
+
+def test_drifting_grating_visual_gain_ramp_scales_single_and_batched_drive() -> None:
+    base_cfg = DriftingGratingConfig(
+        receptive_field=ReceptiveFieldConfig(
+            stimulus_size=2.0,
+            resolution=5,
+            gabor=GaborConfig(sigma=0.5, gamma=1.0, spatial_frequency=1.0, phase=0.0),
+        ),
+        baseline_rate=2.0,
+        visual_gain=1.5,
+        temporal_frequency=0.0,
+        luminance=1.0,
+        contrast=0.8,
+        n_orientations=8,
+    )
+    ramp_cfg = DriftingGratingConfig(
+        receptive_field=base_cfg.receptive_field,
+        baseline_rate=base_cfg.baseline_rate,
+        visual_gain=base_cfg.visual_gain,
+        temporal_frequency=base_cfg.temporal_frequency,
+        luminance=base_cfg.luminance,
+        contrast=base_cfg.contrast,
+        n_orientations=base_cfg.n_orientations,
+        visual_gain_ramp_duration=0.1,
+    )
+    steady = DriftingGratingInput(base_cfg, _layout())
+    ramped = DriftingGratingInput(ramp_cfg, _layout())
+
+    full = steady.external_drive(theta_stim=0.0, t=0.0)
+    np.testing.assert_allclose(ramped.external_drive(theta_stim=0.0, t=0.0), np.zeros_like(full))
+    np.testing.assert_allclose(ramped.external_drive(theta_stim=0.0, t=0.05), 0.5 * full)
+    np.testing.assert_allclose(ramped.external_drive(theta_stim=0.0, t=0.1), full)
+    np.testing.assert_allclose(ramped.external_drive(theta_stim=0.0, t=0.2), full)
+
+    batched = ramped.make_batched_drive_func([0.0])
+    np.testing.assert_allclose(batched(0.05)[:, 0], ramped.external_drive(theta_stim=0.0, t=0.05))

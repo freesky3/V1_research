@@ -23,6 +23,7 @@ class DriftingGratingConfig:
     contrast: float = 1.0
     temporal_frequency: float = 2.0 * np.pi
     n_orientations: int = 8
+    visual_gain_ramp_duration: float = 0.0
 
 
 class DriftingGratingInput:
@@ -60,7 +61,7 @@ class DriftingGratingInput:
         base, cos_coeff, sin_coeff = self._precompute_integrals(theta_stim)
         phase = float(self.cfg.temporal_frequency) * float(t)
         integral = base + cos_coeff * np.cos(phase) + sin_coeff * np.sin(phase)
-        return np.maximum(0.0, float(self.cfg.baseline_rate) + integral) * float(self.cfg.visual_gain)
+        return np.maximum(0.0, float(self.cfg.baseline_rate) + integral) * self._visual_gain(t)
 
     def make_drive_func(self, theta_stim: float) -> Callable[[float], NDArray[np.float64]]:
         """Returns a continuous-time drive function for one orientation."""
@@ -95,7 +96,7 @@ class DriftingGratingInput:
         def drive(t: float) -> NDArray[np.float64]:
             phase = float(self.cfg.temporal_frequency) * float(t) + offsets[np.newaxis, :]
             integral = base + cos_coeff * np.cos(phase) + sin_coeff * np.sin(phase)
-            return np.maximum(0.0, float(self.cfg.baseline_rate) + integral) * float(self.cfg.visual_gain)
+            return np.maximum(0.0, float(self.cfg.baseline_rate) + integral) * self._visual_gain(t)
 
         return drive
 
@@ -108,6 +109,18 @@ class DriftingGratingInput:
         phase = k * (x * np.cos(theta_stim) + y * np.sin(theta_stim))
         phase -= float(self.cfg.temporal_frequency) * float(t)
         return float(self.cfg.luminance) * (1.0 + float(self.cfg.contrast) * np.cos(phase))
+
+    def _visual_gain(self, t: float) -> float:
+        duration = float(self.cfg.visual_gain_ramp_duration)
+        gain = float(self.cfg.visual_gain)
+        if duration <= 0.0:
+            return gain
+        if t <= 0.0:
+            return 0.0
+        if t >= duration:
+            return gain
+        s = float(t) / duration
+        return gain * s * s * (3.0 - 2.0 * s)
 
     def _precompute_integrals(
         self,

@@ -205,12 +205,19 @@ CLI 选项：
 
 | 字段 | 默认值 | 含义 |
 | --- | --- | --- |
-| `time` | `np.linspace(0.0, 0.2, 51)` | 一维、有限、严格递增的时间网格。YAML 中写成列表。 |
+| `time` | `np.linspace(0.0, 0.2, 51)` | 一维、有限、严格递增的时间网格。YAML 中可写成列表，或写成 `start`/`stop` 加 `step` 或 `num` 的 mapping。 |
 
 例子：
 
 ```yaml
 time: [0.0, 0.005, 0.01, 0.015, 0.02]
+```
+
+```yaml
+time:
+  start: 0.0
+  stop: 0.8
+  step: 0.004
 ```
 
 时间点越多，RK4 或 JAX scan 步数越多；`store_trajectory=true` 时输出数组也更大。
@@ -357,6 +364,7 @@ uv run v1-simulation simulate --config configs/simulate_grating.yaml `
 | `grating.receptive_field.*` | 见第 2.5 节 | grating 输入投影到 L4 的 RF 参数。 |
 | `grating.baseline_rate` | `0.0` | L4 grating drive baseline。 |
 | `grating.visual_gain` | `400.0` | RF 积分转 L4 firing-rate drive 的缩放。 |
+| `grating.visual_gain_ramp_duration` | `0.0` | visual gain 的 smoothstep ramp 时长，单位同 time；`0.0` 表示从 `t=0` 直接使用完整 `visual_gain`。 |
 | `grating.luminance` | `1.0` | grating luminance。 |
 | `grating.contrast` | `1.0` | grating contrast。 |
 | `grating.temporal_frequency` | `2*pi` | grating 时间频率，单位按模型时间解释。 |

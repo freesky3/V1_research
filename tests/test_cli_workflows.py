@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 from typer.testing import CliRunner
 
 from v1_research import cli
@@ -63,6 +64,17 @@ def test_cli_config_loader_keeps_optional_null_paths_as_none(tmp_path) -> None:
     cfg = cli.load_workflow_config(config_path, [], SimulationWorkflowConfig)
 
     assert cfg.model_checkpoint is None
+
+
+def test_cli_config_loader_accepts_compact_time_grid_mapping(tmp_path) -> None:
+    config_path = tmp_path / "simulate.yaml"
+    config_path.write_text("time:\n  start: 0.0\n  stop: 0.8\n  step: 0.004\n", encoding="utf-8")
+
+    cfg = cli.load_workflow_config(config_path, [], SimulationWorkflowConfig)
+
+    assert cfg.time.shape == (201,)
+    np.testing.assert_allclose(cfg.time[[0, -1]], [0.0, 0.8])
+    assert np.all(np.diff(cfg.time) > 0.0)
 
 
 def test_cli_train_passes_progress_for_live_status_and_prints_run_dir(tmp_path, monkeypatch) -> None:

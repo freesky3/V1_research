@@ -132,10 +132,37 @@ def _coerce_value(annotation: Any, value: Any) -> Any:
     if _is_path_annotation(annotation):
         return Path(value)
     if _is_time_annotation(annotation):
-        return np.asarray(value, dtype=float)
+        return _coerce_time_grid(value)
     if _is_tuple_annotation(annotation) and isinstance(value, list):
         return tuple(value)
     return value
+
+
+def _coerce_time_grid(value: Any) -> np.ndarray:
+    if isinstance(value, dict):
+        if "start" not in value or "stop" not in value:
+            raise ValueError("time mapping must include start and stop.")
+        start = float(value["start"])
+        stop = float(value["stop"])
+        has_step = "step" in value
+        has_num = "num" in value
+        if has_step == has_num:
+            raise ValueError("time mapping must include exactly one of step or num.")
+        if has_step:
+            step = float(value["step"])
+            if step <= 0.0:
+                raise ValueError("time.step must be positive.")
+            count = int(np.floor((stop - start) / step + 1.0e-12)) + 1
+            grid = start + step * np.arange(count, dtype=float)
+            if grid.size == 0 or grid[-1] < stop - 1.0e-12:
+                grid = np.append(grid, stop)
+            elif grid[-1] > stop + 1.0e-12:
+                grid = grid[grid <= stop + 1.0e-12]
+            grid[-1] = stop
+            return grid
+        num = int(value["num"])
+        return np.linspace(start, stop, num, dtype=float)
+    return np.asarray(value, dtype=float)
 
 
 def _resolve_dataclass_type(annotation: Any) -> type[Any] | None:
@@ -158,7 +185,10 @@ def _is_path_annotation(annotation: Any) -> bool:
 
 def _is_time_annotation(annotation: Any) -> bool:
     args = get_args(annotation)
-    return any(arg is np.ndarray or get_origin(arg) is np.ndarray for arg in args)
+    return any(
+        arg is np.ndarray or get_origin(arg) is np.ndarray or str(get_origin(arg)) == "NDArray"
+        for arg in args
+    )
 
 
 def _is_tuple_annotation(annotation: Any) -> bool:
